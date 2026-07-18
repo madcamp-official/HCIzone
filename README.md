@@ -1,7 +1,9 @@
 # Desktop Pet
 
-A tiny desktop cat that lives in a transparent, always-on-top window on your screen.
-Drawn entirely in code — no image assets.
+A tiny desktop pet that lives in a transparent, always-on-top window on your
+screen. Three characters, rendered from PMD-style sprite sheets in
+[sprites/](sprites/): **Eevee** and **Snorlax** behave like the cat (walk +
+ballistic jumps), **Fletchling** behaves like the bird (flies between ledges).
 
 ## Run it
 
@@ -18,7 +20,7 @@ Requires **Godot 4.2+** (no install here yet: `brew install --cask godot`).
 | Left-click (no drag) | Boop — a heart floats up; wakes it from a nap |
 | Right-click | Feed it a cookie |
 | Middle-click or `P` | Toggle play mode: it chases your cursor |
-| `B` | Toggle bird mode: becomes a parrot that flies instead of jumps |
+| `B` | Cycle character: Eevee → Snorlax → Fletchling |
 | Click the house | Send the cat home / let it back out |
 | `H` | Same as clicking the house |
 | Drag the house | Slide it along the Dock line |
@@ -46,14 +48,31 @@ Requires **Godot 4.2+** (no install here yet: `brew install --cask godot`).
   12–25 s unless you wake it.
 - **Gets hungry** after ~45 s without food: mouth turns sad and it daydreams about
   cookies in a thought bubble. Feeding resets hunger.
-- **Bird mode** (`B`): shapeshifts into a green parrot. Sleep, play mode, feeding,
-  wandering, and going home all behave exactly the same — the only difference is
-  how it crosses gaps between ledges. As a cat it jumps (a crouch, then a
-  ballistic leap under gravity); as a parrot it flies (a smooth, gravity-free
-  glide straight to the target, with a wing flap and a little bob), so falling
-  off a vanished ledge or being dropped mid-air also turns into a flight to the
-  nearest perch instead of a plummet. Toggling mid-air works too — it's a
-  mid-flight shapeshift.
+- **Characters** (`B` cycles): Eevee and Snorlax use the cat behavior; sleep,
+  play, feeding, wandering, and going home are identical — the only difference
+  is how gaps between ledges are crossed: a crouch and a ballistic jump under
+  gravity. Fletchling uses the bird behavior: a smooth, gravity-free flight
+  straight to the target perch, so falling off a vanished ledge or being
+  dropped mid-air becomes a flight to the nearest perch instead of a plummet.
+  Switching mid-air works — a mid-flight shapeshift.
+
+## Sprites
+
+Characters are drawn from PMD-style sheets in [sprites/](sprites/)
+(`<Name>/<Anim>-Anim.png` + `AnimData.xml` with frame sizes and 60 Hz-tick
+durations). Sheets load straight from disk at runtime via `Image.load_from_file`
+on an absolute path — bypassing Godot's resource/import system entirely, so no
+editor import pass is needed. A `sprites/.gdignore` marker tells the editor to
+skip that folder outright (otherwise it tries to auto-import all ~180 PNGs as
+engine textures on project open, which is slow and can leave the project stuck
+"still importing" if you hit Play too soon — if you ever see that, `.gdignore`
+is the fix). Rows are the 8 PMD directions (row 2 = right, row 6 = left; the pet
+only uses those two), columns are frames; single-row sheets (e.g. Sleep) get
+mirrored for the left side. Each sheet's feet line is auto-calibrated by
+scanning frame 0's alpha, so every animation stands on the same ground line.
+State → sheet mapping lives in `FORM_DEFS` at the top of [pet.gd](pet.gd):
+Idle, Walk, Sleep, Hop (jump crouch), Hurt (mid-air), Eat/Swing/Attack
+(eating), Float/FlapAround (carried), FlapAround (flight).
 
 ## The home, and the virtual ↔ real bridge
 
@@ -136,10 +155,12 @@ behind app windows, or via Finder's `CreateDesktop=false` pref, are not landable
 The Dock is located via Godot's usable-screen rect (its bottom edge is the Dock's
 top), so the "Dock platform" spans the full screen width at Dock height.
 
-Debug env vars: `PET_DEBUG=1` logs state, form, icon-poll status, and detected
-ledges once per second; `PET_SPAWN="x,y"` drops the pet at a chosen position (in
-physical pixels); `PET_PLAY=1` starts in play mode; `PET_FORM=parrot` starts as
-a parrot.
+Debug env vars: `PET_DEBUG=1` logs state, form, current animation, icon-poll
+status, and detected ledges once per second; `PET_SPAWN="x,y"` drops the pet at
+a chosen position (in physical pixels); `PET_PLAY=1` starts in play mode;
+`PET_FORM=eevee|snorlax|fletchling` picks the starting character (`cat`/`parrot`
+still work as aliases); `PET_SNAP=/path.png` saves one viewport snapshot ~2 s
+after launch.
 
 ## Tuning
 
