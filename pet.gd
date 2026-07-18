@@ -46,6 +46,7 @@ const HOP_CROUCH := 0.18     # wind-up squat before launching
 const FLY_SPEED := 260.0     # parrot flight speed between ledges
 const FLY_MAX_RANGE := 1500.0
 const FLY_ARRIVE_DIST := 16.0
+const DROP_SNAP_UP := 120.0  # dropped parrot may snap up to a ledge this far above its feet
 const HUNGRY_AFTER := 45.0   # seconds until the cat looks hungry
 const NAP_MIN := 25.0        # seconds of wakefulness before a nap can start
 const NAP_MAX := 60.0
@@ -526,6 +527,38 @@ func _begin_flight() -> void:
 		_fly_to(options.pick_random())
 
 
+## Lands the pet after a drag release. The cat just falls, so it settles on the
+## ledge below the drop point. The parrot must NOT _begin_flight here — that
+## picks a random perch and the drop position would be ignored entirely.
+## Instead it glides down onto the same ledge gravity would find (with a small
+## upward snap, so releasing it slightly onto a window still perches on it).
+func _drop_release() -> void:
+	if form != Form.PARROT:
+		_start_fall()
+		return
+	land_squish = 0.0
+	var fx := _feet_x()
+	var fy := _feet_y()
+	var best := {}
+	for p in platforms:
+		if fx < p.x1 - LEDGE_MARGIN or fx > p.x2 + LEDGE_MARGIN:
+			continue
+		if p.y < fy - DROP_SNAP_UP:
+			continue  # too far above to snap up onto
+		if best.is_empty() or p.y < best.y:
+			best = p
+	if best.is_empty():
+		_start_fall()  # released past the screen edge — fly off to some perch
+		return
+	var lo: float = best.x1 + FOOT_HALF
+	var hi: float = best.x2 - FOOT_HALF
+	fly_target = Vector2(clampf(fx, lo, hi) if lo <= hi else (best.x1 + best.x2) * 0.5, best.y)
+	fly_target_ground = best.id
+	ground_id = -2
+	vy = 0.0
+	state = State.FALL
+
+
 ## One frame of level flight toward fly_target, with a gentle bob. Returns
 ## true once it has landed on fly_target_ground.
 func _fly_step(delta: float) -> bool:
@@ -949,7 +982,7 @@ func _input(event: InputEvent) -> void:
 				if state != State.EAT:
 					state = State.DRAG
 			elif state == State.DRAG:
-				_start_fall()  # drop wherever it was released
+				_drop_release()  # settle right where it was released
 				if not drag_moved:
 					_boop()
 		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
