@@ -1,3 +1,11 @@
-# Godot 4+ specific ignores
+# Godot 4 local import cache
 .godot/
-/android/
+
+# Compiled native helpers — build them locally (see README):
+#   macOS:   clang -O2 -framework CoreGraphics -framework CoreFoundation \
+#              helpers/window_list.c -o helpers/window_list
+#   Windows: gcc -O2 helpers/window_list_win.c -o helpers/window_list.exe
+helpers/window_list
+helpers/window_list.exe
+
+.DS_Store
