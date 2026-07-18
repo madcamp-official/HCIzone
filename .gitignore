@@ -1,0 +1,9 @@
+# Godot 4 local import cache
+.godot/
+
+# Compiled native helper — build it locally (see README):
+#   clang -O2 -framework CoreGraphics -framework CoreFoundation \
+#     helpers/window_list.c -o helpers/window_list
+helpers/window_list
+
+.DS_Store
