@@ -21,9 +21,9 @@ Requires **Godot 4.2+** (no install here yet: `brew install --cask godot`).
 | Right-click | Feed it a cookie |
 | Middle-click or `P` | Toggle play mode: it chases your cursor |
 | `B` | Cycle character: Eevee → Snorlax → Fletchling |
-| Click the house | Send the cat home / let it back out |
-| `H` | Same as clicking the house |
-| Drag the house | Slide it along the Dock line |
+| Click the Pokéball | Recall the pet into the ball / let it back out |
+| `H` | Same as clicking the ball |
+| Drag the Pokéball | Slide it along the Dock line |
 | `Esc` / `Q` | Quit |
 
 ## Behavior
@@ -33,18 +33,23 @@ Requires **Godot 4.2+** (no install here yet: `brew install --cask godot`).
   desktop icon, or the Dock line, and paces along whatever it landed on. It
   rides windows that move, falls (with a squish) when its perch is closed or
   slid out from under it, and sometimes deliberately walks off an edge. Drag it
-  and drop it onto a window or icon to perch it there. Its shadow rests on the
-  ledge it's standing on — clipped to the ledge's edges, never cut off by the
-  Dock, and absent mid-air.
+  and drop it onto a window or icon to perch it there. Its shadow — the
+  translucent pixel ellipse from the sprite sheets' own `<Anim>-Shadow.png`
+  markers — rests on the ledge it's standing on, clipped to the ledge's
+  edges, and absent mid-air.
 - **Play mode** (middle-click or `P`): it sprints after your cursor along its
   ledge, pounces into the air when the cursor is overhead, chases right off
-  edges, and after ~35 s it's all tired out and will nap soon.
+  edges — bursts of pixel musical notes (the PMD VFX from
+  `sprites/move_VFX/0007/001`) pop when it catches the cursor — and after
+  ~35 s it's all tired out and will nap soon.
 - **Hops around on its own.** Every so often it spots another ledge in jumping
   range — a window edge, a desktop icon, sometimes the Dock — crouches, and makes
   a proper ballistic leap onto it (it has cartoon legs: up to ~950 px straight
   up). Icons make natural stepping stones from the Dock up to window tops.
 - **Wanders** left and right along its current ledge now and then.
-- **Naps** after 25–60 s awake: eyes close, it squashes down, z's float up. Naps last
+- **Naps** after 25–60 s awake: eyes close, it squashes down, and a wobbling
+  pixel "Zzz" (the PMD sleep VFX from `sprites/move_VFX/0078`) hovers over
+  it. Naps last
   12–25 s unless you wake it.
 - **Gets hungry** after ~45 s without food: mouth turns sad and it daydreams about
   cookies in a thought bubble. Feeding resets hunger.
@@ -72,16 +77,33 @@ mirrored for the left side. Each sheet's feet line is auto-calibrated by
 scanning frame 0's alpha, so every animation stands on the same ground line.
 State → sheet mapping lives in `FORM_DEFS` at the top of [pet.gd](pet.gd):
 Idle, Walk, Sleep, Hop (jump crouch), Hurt (mid-air), Eat/Swing/Attack
-(eating), Float/FlapAround (carried), FlapAround (flight).
+(eating), Float (carried). An entry may also name a frame subset,
+`"Sheet:first-last[:ticks]"`. Fletchling's **flight** (and being carried) is
+`FlapAround:0-1:5`: the FlapAround sheet spins the bird through all 8
+directions within one loop (playing it whole looks like tumbling), but frames
+0–1 of the facing row are a clean two-frame directional flap, slowed to 5
+ticks per frame.
+
+Characters render at `SPRITE_SCALE` (7.5× the source pixels, ≈220 px tall). The
+window is 760×720 to fit them, so only the box around the sprite itself accepts
+mouse clicks — everything else passes through to whatever is underneath (updated
+every frame from the current frame's opaque bounds). The pet moves by moving its
+OS window; macOS won't place a window above the menu bar, so near the top of the
+screen `_place_window()` clamps the window and draws the sprite (and its click
+box) shifted up inside it by the difference (`vis_off`) instead.
 
 ## The home, and the virtual ↔ real bridge
 
-A little house (its own transparent window, drawn in [home.gd](home.gd)) sits on
-the Dock line; drag it sideways to place it. Click it (or press `H`) and the cat
+A classic red Pokéball (its own transparent window, rendered in
+[home.gd](home.gd) from the leftmost column of `pokeball sprite.png`) sits on
+the Dock line; drag it sideways to place it. Click it (or press `H`) and the pet
 travels there — walking its ledge, marching off edges, falling, resuming — then
-shrinks into the doorway and vanishes. While it's inside, amber eyes blink from
-the dark door and the house window glows. Click again to let it back out. It also
-wanders home by itself every few minutes, and its roof is a hoppable perch.
+the ball opens, flares with light, and the pet shrinks into it as a white-hot
+streak before the ball snaps shut. While it's inside, the ball's button blinks
+like a red LED, it wobbles now and then, and it leaks little sparkles. Click
+again and the ball bursts
+open in a flash of rays as the pet beams back out. It also goes home by itself
+every few minutes, and the ball's crown is a (precarious) hoppable perch.
 
 Going home is the **handoff point to a physical pet robot**: the idea is that the
 soul leaves the screen and wakes up in the robot. Everything an external
@@ -159,10 +181,18 @@ Debug env vars: `PET_DEBUG=1` logs state, form, current animation, icon-poll
 status, and detected ledges once per second; `PET_SPAWN="x,y"` drops the pet at
 a chosen position (in physical pixels); `PET_PLAY=1` starts in play mode;
 `PET_FORM=eevee|snorlax|fletchling` picks the starting character (`cat`/`parrot`
-still work as aliases); `PET_SNAP=/path.png` saves one viewport snapshot ~2 s
-after launch.
+still work as aliases); `PET_NAP=1` naps at the first opportunity;
+`PET_SNAP=/path.png` saves one viewport snapshot (plus
+the Pokéball window's view as `…-home.png`) `PET_SNAP_AT` seconds after launch
+(default ~2 s, minimum 0.5); `PET_NO_ICONS=1` skips the Finder desktop-icon poll — useful in
+contexts where the Finder-automation permission prompt can't be answered, since
+an unanswered prompt blocks the whole poll thread (ledges and bridge commands
+stop updating).
 
 ## Tuning
 
 All the personality knobs are constants at the top of [pet.gd](pet.gd):
-`WANDER_SPEED`, `HUNGRY_AFTER`, `NAP_MIN`/`NAP_MAX`, nap lengths, and the colors.
+`SPRITE_SCALE` (character size), `WANDER_SPEED`, `HUNGRY_AFTER`,
+`NAP_MIN`/`NAP_MAX`, nap lengths, jump/flight speeds. If you change
+`SPRITE_SCALE` much, grow or shrink the window size in
+[project.godot](project.godot) to match.

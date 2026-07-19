@@ -20,8 +20,8 @@ config/features=PackedStringArray("4.7")
 
 [display]
 
-window/size/viewport_width=220
-window/size/viewport_height=190
+window/size/viewport_width=760
+window/size/viewport_height=720
 window/size/resizable=false
 window/size/borderless=true
 window/size/always_on_top=true
