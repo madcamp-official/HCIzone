@@ -4,23 +4,23 @@
  * ----------------------------------------------------------------------------
  *  Arduino Uno · 스키드 스티어(차동구동) · 비차단(non-blocking) 상태머신
  *
- *  상태: IDLE → DRIVE(주행) → AVOID(회피) / CLIFF(낭떠러지) → HOME(귀가) → DOCKED
+ *  상태: IDLE → DRIVE(주행) → AVOID(회피) / CLIFF(낭떠러지) → HOME(귀가) → ARRIVED
  *  설계 원칙(README 8번):
  *    - delay() 없이 millis() 기반 타이밍으로 전 상태를 굴린다.
  *    - 낭떠러지 감지는 매 루프 "최우선"으로 검사해 다른 모든 상태를 가로챈다.
  *    - 블루투스 명령은 센서 읽기 사이에서만 처리(SoftwareSerial 지터 회피).
  *
- *  블루투스 명령(단일 문자, HC-05 또는 USB 시리얼):
- *    'F' 주행 시작   'S' 정지   'H' 귀가   'G' 도킹 해제 후 주행   '?' 상태 출력
+ *  블루투스 명령(단일 문자, HC-06 또는 USB 시리얼):
+ *    'F' 주행 시작   'S' 정지   'H' 귀가   'G' 재출발   '?' 상태 출력
  * ============================================================================
  */
 
 #include <SoftwareSerial.h>
 
 // ─────────────────────────────────────────────────────────────────────────
-//  핀맵 (README 4장 / 00_통합_핀맵.md 와 동일)
+//  핀맵 (최종 배치도)
 // ─────────────────────────────────────────────────────────────────────────
-// 모터 — L298N 2개를 좌/우 그룹으로 묶음. EN은 PWM 핀이어야 함.
+// 모터 — L298N 2개를 좌/우 그룹으로 묶음. EN은 PWM 핀이어야 함. (고정)
 const uint8_t PIN_L_EN  = 11;  // 좌 EN  (PWM)
 const uint8_t PIN_L_IN1 = 10;  // 좌 IN1
 const uint8_t PIN_L_IN2 = 9;   // 좌 IN2
@@ -28,31 +28,26 @@ const uint8_t PIN_R_EN  = 6;   // 우 EN  (PWM)
 const uint8_t PIN_R_IN1 = 5;   // 우 IN1
 const uint8_t PIN_R_IN2 = 3;   // 우 IN2
 
-// 블루투스 HC-05 (SoftwareSerial)
-const uint8_t PIN_BT_RX = 2;   // 아두이노 RX  ← HC-05 TXD
-const uint8_t PIN_BT_TX = 4;   // 아두이노 TX  → HC-05 RXD (1k·2k 전압분배)
+// 블루투스 HC-06 (SoftwareSerial)
+const uint8_t PIN_BT_RX = 2;   // 아두이노 RX (D2) ← HC-06 TXD
+const uint8_t PIN_BT_TX = 4;   // 아두이노 TX (D4) → HC-06 RXD (1k/2k 전압분배)
 
-// IR 비콘 수신 KY-022 (38kHz 버스트 수신 시 LOW). 방향 유도용.
+// IR 비콘 수신 KY-022 (38kHz 버스트 수신 시 LOW). 방향 유도용. 폴링.
 const uint8_t PIN_IR_L = 7;    // 좌측 수신
 const uint8_t PIN_IR_R = 8;    // 우측 수신
 
-// 초음파 HC-SR04 (1개만 사용)
+// 초음파 HC-SR04 (1개만 사용). ECHO 직결.
 const uint8_t PIN_TRIG = 13;
 const uint8_t PIN_ECHO = 12;
 
-// 낭떠러지 FC-51 (비교기 디지털 출력). A0/A1 을 디지털로 사용.
-const uint8_t PIN_CLIFF_L = A0;
-const uint8_t PIN_CLIFF_R = A1;
-
-// 리드 스위치 (도킹 판정). INPUT_PULLUP, 자석 접촉 시 LOW.
-const uint8_t PIN_REED = A2;
+// 낭떠러지 KY-032 (IR 근접, 비교기 디지털 출력) 1개. OUT → A0 를 디지털로 사용.
+const uint8_t PIN_CLIFF = A0;
 
 // ─────────────────────────────────────────────────────────────────────────
 //  튜닝 상수 (개체마다 실측으로 조정)
 // ─────────────────────────────────────────────────────────────────────────
 // 센서 극성 — 하드웨어에 맞춰 뒤집을 수 있게 상수화
-const uint8_t CLIFF_SURFACE_STATE = LOW;  // 바닥이 있을 때 FC-51 출력. 낭떠러지 = 반대값.
-const uint8_t REED_DOCKED_STATE   = LOW;  // 자석 접촉(도킹) 시 리드 스위치 값.
+const uint8_t CLIFF_SURFACE_STATE = LOW;  // 바닥이 있을 때 KY-032 출력. 낭떠러지 = 반대값.
 const uint8_t IR_ACTIVE_STATE     = LOW;  // 비콘 버스트 수신 시 KY-022 출력.
 
 // 모터 속도 (0~255 PWM)
@@ -71,21 +66,24 @@ const uint32_t ECHO_TIMEOUT_US = 8000;  // ~1.3m. pulseIn 블로킹 상한을 �
 
 // IR 방향 측정창 (README: 측정창 140ms)
 const uint16_t IR_WINDOW_MS = 140;
-const uint8_t  IR_MARGIN    = 2;   // 좌우 카운트 차가 이 값 넘어야 방향 확정
+const uint8_t  IR_MARGIN    = 2;    // 좌우 카운트 차가 이 값 넘어야 방향 확정
+// 리드 스위치가 빠졌으므로 도킹은 IR 세기로 근사. 두 수신 합이 이 값 이상이면
+// "집에 충분히 가까움"으로 보고 정지. 실측으로 반드시 튜닝할 것.
+const uint16_t IR_ARRIVE_COUNT = 40;
 
 // ─────────────────────────────────────────────────────────────────────────
 //  전역 상태
 // ─────────────────────────────────────────────────────────────────────────
 SoftwareSerial bt(PIN_BT_RX, PIN_BT_TX);
 
-enum State { ST_IDLE, ST_DRIVE, ST_AVOID, ST_CLIFF, ST_HOME, ST_DOCKED };
+enum State { ST_IDLE, ST_DRIVE, ST_AVOID, ST_CLIFF, ST_HOME, ST_ARRIVED };
 State state = ST_IDLE;
 State resumeState = ST_DRIVE;   // AVOID/CLIFF 종료 후 복귀할 상태
 
 // 회피/낭떠러지 시퀀스 진행용
 uint8_t  seqPhase = 0;
 uint32_t seqStart = 0;
-bool     turnRight = true;      // 회전 방향(장애/낭떠러지 반대쪽)
+bool     turnRight = true;      // 회전 방향
 
 // 초음파
 uint32_t lastUltra = 0;
@@ -123,15 +121,9 @@ void spinLeft(int s)   { drive(-s, s); }
 // ─────────────────────────────────────────────────────────────────────────
 //  센서
 // ─────────────────────────────────────────────────────────────────────────
-// 낭떠러지: 좌우 중 하나라도 바닥이 사라지면 true. 함께 어느 쪽인지 기록.
-bool cliffDetected(bool &leftCliff, bool &rightCliff) {
-  leftCliff  = (digitalRead(PIN_CLIFF_L) != CLIFF_SURFACE_STATE);
-  rightCliff = (digitalRead(PIN_CLIFF_R) != CLIFF_SURFACE_STATE);
-  return leftCliff || rightCliff;
-}
-
-bool isDocked() {
-  return digitalRead(PIN_REED) == REED_DOCKED_STATE;
+// 낭떠러지: 단일 KY-032. 바닥이 사라지면 true. (센서가 1개라 좌/우 구분 불가)
+bool cliffDetected() {
+  return digitalRead(PIN_CLIFF) != CLIFF_SURFACE_STATE;
 }
 
 // 초음파: 주기적 측정(짧은 pulseIn). 측정 안 한 사이클은 이전 값 유지.
@@ -177,7 +169,7 @@ bool runRecoverySequence() {
       forward(-SPEED_CRUISE);
       if (t >= BACKUP_MS) { seqPhase = 2; seqStart = millis(); }
       return false;
-    case 2:  // 반대쪽으로 회전
+    case 2:  // 회전
       if (turnRight) spinRight(SPEED_TURN); else spinLeft(SPEED_TURN);
       if (t >= TURN_MS) { stopMotors(); return true; }
       return false;
@@ -201,7 +193,7 @@ void handleCommand(char c) {
     case 'H': case 'h':
       state = ST_HOME; irWindowStart = millis(); irCntL = irCntR = 0;
       Serial.println(F("CMD: HOME")); break;
-    case 'G': case 'g': state = ST_DRIVE;  Serial.println(F("CMD: UNDOCK->DRIVE")); break;
+    case 'G': case 'g': state = ST_DRIVE;  Serial.println(F("CMD: GO/DRIVE")); break;
     case '?': Serial.print(F("STATE=")); Serial.print(state);
               Serial.print(F(" dist=")); Serial.print(lastDistCm);
               Serial.print(F(" irL=")); Serial.print(irLatchL);
@@ -224,9 +216,7 @@ void setup() {
   pinMode(PIN_ECHO, INPUT);
   pinMode(PIN_IR_L, INPUT);
   pinMode(PIN_IR_R, INPUT);
-  pinMode(PIN_CLIFF_L, INPUT);
-  pinMode(PIN_CLIFF_R, INPUT);
-  pinMode(PIN_REED, INPUT_PULLUP);
+  pinMode(PIN_CLIFF, INPUT);
   stopMotors();
 
   Serial.begin(9600);
@@ -236,10 +226,9 @@ void setup() {
 
 void loop() {
   // 1) 낭떠러지 = 최우선. 다른 어떤 상태든 즉시 가로챈다.
-  bool cl = false, cr = false;
-  if (cliffDetected(cl, cr) && state != ST_CLIFF && state != ST_DOCKED) {
-    // 낭떠러지 반대쪽으로 회전. 좌측 낭떠러지면 오른쪽으로.
-    beginRecovery(/*back=*/(state == ST_HOME ? ST_HOME : ST_DRIVE), /*goRight=*/cl);
+  if (cliffDetected() && state != ST_CLIFF) {
+    // 센서가 1개라 낭떠러지 방향을 알 수 없음 → 후진 후 기본 방향으로 회전.
+    beginRecovery(/*back=*/(state == ST_HOME ? ST_HOME : ST_DRIVE), /*goRight=*/true);
     state = ST_CLIFF;
   }
 
@@ -270,7 +259,10 @@ void loop() {
       break;
 
     case ST_HOME: {
-      if (isDocked()) { stopMotors(); state = ST_DOCKED; Serial.println(F("DOCKED")); break; }
+      // 리드 스위치가 없으므로 IR 세기로 "집 근접" 판정.
+      if (irLatchL + irLatchR >= IR_ARRIVE_COUNT) {
+        stopMotors(); state = ST_ARRIVED; Serial.println(F("ARRIVED")); break;
+      }
       if (obstacleAhead()) { beginRecovery(ST_HOME, true); state = ST_AVOID; break; }
       // IR 세기 비교로 조향
       int diff = (int)irLatchL - (int)irLatchR;
@@ -281,8 +273,8 @@ void loop() {
       break;
     }
 
-    case ST_DOCKED:
-      stopMotors();  // 'G' 명령으로만 빠져나감
+    case ST_ARRIVED:
+      stopMotors();  // 'G'/'F' 명령으로만 빠져나감
       break;
   }
 }
