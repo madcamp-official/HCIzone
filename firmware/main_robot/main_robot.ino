@@ -55,6 +55,13 @@ const uint8_t SPEED_CRUISE = 150;  // 주행
 const uint8_t SPEED_TURN   = 170;  // 제자리 회전
 const uint8_t SPEED_HOME   = 130;  // 귀가(천천히)
 
+// 좌/우 채널 속도 보정 (trim). 100 = 보정 없음.
+// 직진이 한쪽으로 휘면 빠른 쪽을 낮춘다(예: 왼쪽이 빠르면 TRIM_LEFT=90).
+// ※ 좌/우 "면" 단위 보정이다. 같은 쪽 두 바퀴는 PWM을 공유하므로
+//   "왼쪽 두 바퀴끼리 다른 속도"는 trim으로 보정되지 않는다(점퍼/모터 편차 문제).
+const uint16_t TRIM_LEFT  = 100;
+const uint16_t TRIM_RIGHT = 100;
+
 // 회피/낭떠러지 복구 타이밍 (ms)
 const uint16_t BACKUP_MS = 350;    // 후진 시간
 const uint16_t TURN_MS   = 400;    // 회전 시간
@@ -98,9 +105,10 @@ uint8_t  irPrevL = HIGH, irPrevR = HIGH;
 // ─────────────────────────────────────────────────────────────────────────
 //  모터 제어 (스키드 스티어). speed: -255~255 (음수 = 후진)
 // ─────────────────────────────────────────────────────────────────────────
-void sideDrive(uint8_t enPin, uint8_t in1, uint8_t in2, int speed) {
+void sideDrive(uint8_t enPin, uint8_t in1, uint8_t in2, int speed, uint16_t trim) {
   int mag = speed;
   if (mag < 0) mag = -mag;
+  mag = (int)(((uint32_t)mag * trim) / 100);   // trim 보정 (방향은 speed 부호로 판단)
   if (mag > 255) mag = 255;
   if (speed > 0) { digitalWrite(in1, HIGH); digitalWrite(in2, LOW); }
   else if (speed < 0) { digitalWrite(in1, LOW); digitalWrite(in2, HIGH); }
@@ -109,8 +117,8 @@ void sideDrive(uint8_t enPin, uint8_t in1, uint8_t in2, int speed) {
 }
 
 void drive(int left, int right) {
-  sideDrive(PIN_L_EN, PIN_L_IN1, PIN_L_IN2, left);
-  sideDrive(PIN_R_EN, PIN_R_IN1, PIN_R_IN2, right);
+  sideDrive(PIN_L_EN, PIN_L_IN1, PIN_L_IN2, left,  TRIM_LEFT);
+  sideDrive(PIN_R_EN, PIN_R_IN1, PIN_R_IN2, right, TRIM_RIGHT);
 }
 
 void stopMotors()      { drive(0, 0); }
