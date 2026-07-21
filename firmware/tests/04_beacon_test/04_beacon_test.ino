@@ -1,67 +1,56 @@
 /*
- * 04_beacon_test — IR 비콘 방향 탐지 (KY-022 좌/우)
+ * 04_beacon_test — IR 비콘 방향/세기 비교 (KY-022 x2, AGC 대응판)
  * ---------------------------------------------------------------------------
- * 수신모듈(KY-022/VS1838B 등)은 38kHz 유효신호가 들어오면 출력이 LOW로 떨어진다.
- * ※ 38kHz 복조는 수신칩이 하드웨어로 처리한다. 이 코드는 주파수를 다루지 않고
- *   핀의 LOW/HIGH만 세므로, 송신 주파수와 "코드"가 어긋날 일은 없다.
+ * 검증된 05b_ir_receiver_test 와 로직·상수·구조를 동일하게 맞춘 버전.
+ * 유일한 차이: 핀만 통합 배치도의 D7/D8 사용 (05b는 D2/D4 → HC-06과 충돌).
  *
- * 송신기(05a)와의 짝맞춤이 핵심:
- *   05a는 "약 10ms 버스트 + 60ms 휴식 = 주기 70ms"로 쏜다(AGC 회복용).
- *   따라서 측정 창은 그 주기를 확실히 덮도록 2배(≈140ms)로 잡아,
- *   창 안에 버스트가 최소 한 번은 들어오게 한다. (창이 좁으면 휴식 구간에
- *   걸려 신호를 통째로 놓쳐 값이 0으로 죽는다 = AGC 오인.)
+ * 송신기(05a)가 "짧게 쏘고 길게 쉬는"(주기 70ms) 방식이므로, 측정 창을 넓혀
+ * (약 140ms = 50us x 2800) 그 주기 안의 버스트를 확실히 잡는다. 이렇게 하면
+ * 신호가 갑자기 0으로 죽는 AGC 문제가 완화된다.
  *
- * 좌/우 핀을 고정 간격으로 샘플링해 LOW 히트수를 세고 '비율'로 방향을 판정.
- * 핀맵 (통합 배치도): 비콘 좌 = D7,  비콘 우 = D8 (폴링)
- *   (참고: 05b 예제는 D2/D4를 썼으나, 그 핀은 HC-06과 충돌하므로 D7/D8 사용)
+ * 배선(KY-022: S / 중앙+(VCC) / -(GND)):
+ *   수신기 L : S -> 7 , VCC -> 5V , GND -> GND
+ *   수신기 R : S -> 8 , VCC -> 5V , GND -> GND
  *
- * 출력: hitL / hitR / 방향(LEFT / RIGHT / AHEAD / none)
+ * 원리: 수신 중 S가 LOW. 넓은 창에서 LOW 샘플 수를 세어 좌우 비교.
+ *   (값이 작아지는 대신 안정적으로 유지됨. 절대값보다 L/R 비교를 볼 것)
  */
 
-const uint8_t PIN_BEACON_L = 7;
-const uint8_t PIN_BEACON_R = 8;
+const int RX_L = 7, RX_R = 8;   // ★ 핀만 유지, 나머지는 05b와 동일
+const int SAMPLES    = 2800;    // 약 140ms (50us x 2800) - 비콘 주기(70ms)의 2배
+const int NO_SIGNAL  = 25;      // 이 값 미만이면 신호 없음
+const int CENTER_TOL = 30;      // 좌우 차이가 이보다 작으면 정면
 
-const unsigned long BEACON_WINDOW_MS = 140;  // 송신 주기(70ms)의 2배 — 버스트 확실히 포착
-const unsigned int  BEACON_SAMPLE_US = 50;   // 샘플 간격(버스트 엔벨로프까지 촘촘히)
-const unsigned int  BEACON_MIN_HITS  = 25;   // 이보다 적으면 신호 없음(05b와 동일)
-const unsigned int  BEACON_DIFF_PCT  = 20;   // 큰 쪽 대비 이 % 이상 차이나야 방향 확정
-
-// -2 신호없음 / -1 왼쪽 / 0 정면 / +1 오른쪽
-int readBeaconDirection(unsigned int &hitL, unsigned int &hitR) {
-  unsigned long t0 = millis();
-  hitL = 0; hitR = 0;
-  while (millis() - t0 < BEACON_WINDOW_MS) {
-    if (digitalRead(PIN_BEACON_L) == LOW) hitL++;
-    if (digitalRead(PIN_BEACON_R) == LOW) hitR++;
-    delayMicroseconds(BEACON_SAMPLE_US);
+int signalStrength(int pin) {
+  int lowCount = 0;
+  for (int i = 0; i < SAMPLES; i++) {
+    if (digitalRead(pin) == LOW) lowCount++;
+    delayMicroseconds(50);
   }
-  unsigned int total = hitL + hitR;
-  if (total < BEACON_MIN_HITS) return -2;
-  unsigned int larger = (hitL > hitR) ? hitL : hitR;
-  unsigned int diff   = (hitL > hitR) ? (hitL - hitR) : (hitR - hitL);
-  if ((unsigned long)diff * 100UL >= (unsigned long)larger * BEACON_DIFF_PCT)
-    return (hitL > hitR) ? -1 : +1;
-  return 0;
+  return lowCount;
 }
 
 void setup() {
-  pinMode(PIN_BEACON_L, INPUT);
-  pinMode(PIN_BEACON_R, INPUT);
   Serial.begin(9600);
-  Serial.println(F("=== beacon test (L=D7, R=D8) ==="));
+  pinMode(RX_L, INPUT);
+  pinMode(RX_R, INPUT);
+  Serial.println("IR receiver direction test (AGC-safe) start");
 }
 
 void loop() {
-  unsigned int hitL, hitR;
-  int dir = readBeaconDirection(hitL, hitR);
-  Serial.print(F("hitL=")); Serial.print(hitL);
-  Serial.print(F(" hitR=")); Serial.print(hitR);
-  Serial.print(F(" -> "));
-  switch (dir) {
-    case -1: Serial.println(F("LEFT"));  break;
-    case  0: Serial.println(F("AHEAD")); break;
-    case +1: Serial.println(F("RIGHT")); break;
-    default: Serial.println(F("none"));  break;
+  int left  = signalStrength(RX_L);
+  int right = signalStrength(RX_R);
+
+  Serial.print("L="); Serial.print(left);
+  Serial.print("  R="); Serial.print(right);
+  Serial.print("  -> ");
+
+  if (left < NO_SIGNAL && right < NO_SIGNAL) {
+    Serial.println("NO SIGNAL (신호 없음 - 재탐색)");
+  } else {
+    int diff = left - right;
+    if (abs(diff) < CENTER_TOL) Serial.println("정면(CENTER)");
+    else if (diff > 0)          Serial.println("집은 왼쪽 (turn LEFT)");
+    else                        Serial.println("집은 오른쪽 (turn RIGHT)");
   }
-  delay(300);
 }
