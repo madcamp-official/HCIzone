@@ -8,10 +8,15 @@ extends Node2D
 ##  - Click (without dragging) to boop it — this also wakes it from a nap.
 ##  - Middle-click or press P to toggle play mode: it chases your cursor,
 ##    jumping after it, until it gets tired.
-##  - Press B to toggle bird mode: it becomes a parrot and flies smoothly
-##    between ledges instead of jumping. Sleep, play mode, feeding, and going
-##    home all work exactly the same either way.
+##  - Press B to cycle characters: Eevee and Snorlax behave like the cat
+##    (walk + ballistic jumps), Fletchling behaves like the bird (flies
+##    between ledges). Sleep, play mode, feeding, and going home all work
+##    exactly the same for every character.
 ##  - Esc or Q quits.
+##
+## Characters are rendered from PMD-style sprite sheets in res://sprites/
+## (<Name>/<Anim>-Anim.png + AnimData.xml). Sheets are loaded directly from
+## disk at runtime, so no editor import pass is needed.
 ##
 ## Other windows are detected by helpers/window_list (a tiny CoreGraphics
 ## helper, see helpers/window_list.c). Desktop icons are read from Finder via
@@ -20,30 +25,48 @@ extends Node2D
 ## only knows about the Dock line and screen bottom.
 
 enum State { IDLE, WANDER, EAT, NAP, DRAG, FALL, PLAY, HOP, GO_HOME, ENTER_HOME, HOME, EXIT_HOME }
-enum Form { CAT, PARROT }
+enum Form { EEVEE, SNORLAX, FLETCHLING }
 
-const CENTER := Vector2(110.0, 118.0)
-const FOOT_Y := 162.0        # feet line, in window-local pixels
-const FOOT_HALF := 22.0      # half-width of the pet's footprint
+# Per-character config: sprite folder, whether it uses the bird behavior
+# (fly instead of jump), and which sheet each situation uses.
+# An anim may be "Sheet" or "Sheet:first-last[:ticks]" — the latter plays only
+# frames first..last of that sheet (optionally at a fixed ticks-per-frame).
+# NOTE: Fletchling's FlapAround sheet spins the bird through all 8 directions
+# within one loop, so playing it whole looks like tumbling; frames 0-1 of the
+# facing row are a clean directional flap, and that pair is its flight.
+const FORM_DEFS: Array[Dictionary] = [
+	{ name = "Eevee", bird = false, anims = {
+		idle = "Idle", walk = "Walk", sleep = "Sleep", eat = "Eat",
+		air = "Hurt", crouch = "Hop", drag = "Float", fly = "" } },
+	{ name = "Snorlax", bird = false, anims = {
+		idle = "Idle", walk = "Walk", sleep = "Sleep", eat = "Swing",
+		air = "Hurt", crouch = "Hop", drag = "Hurt", fly = "" } },
+	{ name = "Fletchling", bird = true, anims = {
+		idle = "Idle", walk = "Walk", sleep = "Sleep", eat = "Attack",
+		air = "Hurt", crouch = "Hop", drag = "FlapAround:0-1:5", fly = "FlapAround:0-1:5" } },
+]
+
+const CENTER := Vector2(380.0, 400.0)
+const FOOT_Y := 660.0        # feet line, in window-local pixels
+const FOOT_HALF := 40.0      # half-width of the pet's footprint
 const GRAVITY := 2600.0
 const MAX_FALL_SPEED := 1600.0
-const MIN_LEDGE := 70.0      # narrowest window edge worth standing on
-const MIN_ICON_LEDGE := 30.0 # icons are small; allow narrower perches
-const LEDGE_MARGIN := 6.0    # how far feet may hang past a ledge
-const BODY_COLOR := Color("f2a65a")
-const BELLY_COLOR := Color("ffd9a8")
-const DARK := Color("5a3a22")
-const BLUSH := Color(1.0, 0.55, 0.55, 0.5)
-const WANDER_SPEED := 55.0
-const PLAY_SPEED := 230.0    # chase speed in play mode
-const JUMP_VY := -1150.0     # jump impulse in play mode
+const MIN_LEDGE := 90.0      # narrowest window edge worth standing on
+const MIN_ICON_LEDGE := 80.0 # icons need to hold the bigger footprint too
+const LEDGE_MARGIN := 14.0   # how far feet may hang past a ledge
+const SPRITE_SCALE := 7.5    # sprite sheets are tiny GBA-scale pixels
+const VFX_SCALE := SPRITE_SCALE / 3.0  # move_VFX overlays, deliberately daintier
+const SPRITE_TICK := 1.0 / 60.0  # AnimData durations are 60 Hz ticks
+const WANDER_SPEED := 90.0
+const PLAY_SPEED := 320.0    # chase speed in play mode
+const JUMP_VY := -1600.0     # jump impulse in play mode
 const PLAY_LENGTH := 35.0    # seconds of play before it gets tired
 const HOP_MAX_UP := 950.0    # highest ledge it will hop up to (cartoon legs)
 const HOP_MAX_DROP := 1200.0 # furthest it will hop down
 const HOP_MAX_DX := 720.0    # horizontal hop reach
 const HOP_MAX_VX := 620.0    # fastest horizontal hop speed
 const HOP_CROUCH := 0.18     # wind-up squat before launching
-const FLY_SPEED := 260.0     # parrot flight speed between ledges
+const FLY_SPEED := 420.0     # bird flight speed between ledges
 const FLY_MAX_RANGE := 1500.0
 const FLY_ARRIVE_DIST := 16.0
 const DROP_SNAP_UP := 120.0  # dropped parrot may snap up to a ledge this far above its feet
@@ -52,21 +75,18 @@ const NAP_MIN := 25.0        # seconds of wakefulness before a nap can start
 const NAP_MAX := 60.0
 const NAP_LENGTH_MIN := 12.0
 const NAP_LENGTH_MAX := 25.0
-const HOME_W := 190          # home window size
-const HOME_H := 170
-const HOME_FLOOR := 158.0    # floor line inside the home window
-const HOME_DOOR_X := 95.0    # doorway center
-const HOME_SPEED := 180.0    # walking speed when heading home
-const ENTER_TIME := 0.7      # seconds to slip into / out of the door
+const HOME_W := 320          # home (Pokéball) window size — big enough for the flash
+const HOME_H := 260
+const HOME_FLOOR := 200.0    # floor line inside the home window
+const HOME_DOOR_X := 160.0   # ball center
+const HOME_SPEED := 260.0    # walking speed when heading home
+const ENTER_TIME := 1.6      # seconds of capture/release beam animation
 const HomeArt := preload("res://home.gd")
 
 var state: State = State.FALL   # spawn in the air and drop onto something
 var t := 0.0                 # global animation clock
 var state_timer := 0.0       # counts down inside timed states
 var facing := 1              # 1 = facing right, -1 = facing left
-
-var blink := 0.0             # >0 while eyes are mid-blink
-var blink_timer := 2.0
 
 var hunger := 0.0
 var nap_in := 0.0            # wall-clock until the next nap
@@ -82,10 +102,20 @@ var hop_vy := 0.0            # launch velocities for the pending hop
 var hop_vx := 0.0
 var hop_crouch := 0.0        # >0 while winding up to jump
 
-var form: Form = Form.PARROT # cat walks and jumps; parrot flies instead
+var form: Form = Form.FLETCHLING     # current character (B cycles)
 var fly_target := Vector2.ZERO       # feet destination while flying (global px)
 var fly_target_ground := -1          # platform id fly_target sits on
 var fly_bob_time := 0.0
+
+# Sprite animation state. _sprites[form] = { anim_name: {tex, fw, fh, rows,
+# durs (seconds per frame), total, foot/top (content bounds within a frame),
+# half_w (content half-width from frame center)} }
+var _sprites := {}
+# _metrics[form] = idle-pose content size {half_w, height} in sprite pixels —
+# used to place the shadow, particles, and cookie around any character.
+var _metrics := {}
+var _anim_name := ""
+var _anim_clock := 0.0
 
 var going_home := false      # persists across falls/hops on the way home
 var anim_progress := 0.0     # 0..1 during ENTER_HOME / EXIT_HOME
@@ -110,7 +140,12 @@ var drag_offset := Vector2i.ZERO
 var press_pos := Vector2i.ZERO
 
 # Platforming state.
-var pos_f := Vector2.ZERO    # float mirror of the OS window position
+var pos_f := Vector2.ZERO    # logical window position (the OS may refuse it)
+# macOS pins windows below the menu bar, so the window can't always go where
+# pos_f wants (feet could never rise above window-top + FOOT_Y — the pet
+# "walked on air" toward high ledges). vis_off is whatever part of the move
+# the OS refused, applied instead as an in-window drawing/click-box offset.
+var vis_off := Vector2.ZERO
 var vy := 0.0
 var ground_id := -2          # platform id we stand on; -2 = airborne.
                              # Window ids are positive, -1 = Dock line,
@@ -127,18 +162,30 @@ var _windows: Array = []     # {id: int, rect: Rect2} in points, front-to-back
 var _icons: Array = []       # icon centers, in points
 var _icon_size := 64.0       # in points
 var _icon_status := "pending"  # for PET_DEBUG: result of the last icon poll
-var _icons_supported := OS.get_name() == "macOS"  # icons come from Finder
+# Icons come from Finder; PET_NO_ICONS=1 skips that poll entirely — useful
+# where the Finder-automation permission dialog can't be answered, since an
+# unanswered prompt makes osascript block the whole poll thread.
+var _icons_supported := OS.get_name() == "macOS" \
+	and OS.get_environment("PET_NO_ICONS") == ""
 var _helper_path := ""
 var _icons_script_path := ""
 
-# Floating decorations: hearts when booped, z's while napping,
-# and a cookie thought-bubble when hungry.
+# Floating decorations: hearts when booped, a pixel Zzz while napping,
+# musical notes in play mode, and a cookie thought-bubble when hungry.
 var particles: Array[Dictionary] = []
+# move_VFX overlay animations (see _load_vfx): kind -> {frames, ft}.
+# Particles whose kind is in here play the frames in place instead of the
+# procedural drift-and-fade behavior.
+var _vfx := {}
 
 @onready var win: Window = get_window()
 
 # Run with PET_DEBUG=1 in the environment to log state once per second.
 @onready var _debug := OS.get_environment("PET_DEBUG") != ""
+# PET_SNAP=/path.png saves one viewport snapshot (plus the home ball's view
+# as …-home.png) PET_SNAP_AT seconds after launch (default ~2 s).
+@onready var _snap_path := OS.get_environment("PET_SNAP")
+@onready var _snap_at := maxf(OS.get_environment("PET_SNAP_AT").to_float(), 0.5)
 
 
 func _ready() -> void:
@@ -151,21 +198,35 @@ func _ready() -> void:
 	if spawn.contains(","):
 		var parts := spawn.split(",")
 		pos_f = Vector2(parts[0].to_float(), parts[1].to_float())
-		win.position = Vector2i(pos_f.round())
+		_place_window()
 	var helper_file := "window_list.exe" if OS.get_name() == "Windows" else "window_list"
 	_helper_path = ProjectSettings.globalize_path("res://helpers/" + helper_file)
 	_icons_script_path = ProjectSettings.globalize_path("res://helpers/desktop_icons.applescript")
 	# PET_PLAY=1 starts in play mode (handy for testing).
 	if OS.get_environment("PET_PLAY") != "":
 		_toggle_play()
-	# PET_FORM=cat or parrot forces a starting form (handy for testing).
+	# PET_FORM forces a starting character (handy for testing). The old
+	# cat/parrot names still work as aliases.
 	match OS.get_environment("PET_FORM").to_lower():
-		"cat": form = Form.CAT
-		"parrot": form = Form.PARROT
-	if form == Form.PARROT:
-		_begin_flight()  # give the initial fall a real flight target
+		"eevee", "cat": form = Form.EEVEE
+		"snorlax": form = Form.SNORLAX
+		"fletchling", "parrot", "bird": form = Form.FLETCHLING
+	# PET_NAP=1 makes it nap at the first opportunity (handy for testing).
+	if OS.get_environment("PET_NAP") != "":
+		nap_in = 0.0
+	texture_filter = TEXTURE_FILTER_NEAREST  # crisp pixel art when scaled
+	_load_form_sprites(form)
+	_load_vfx()
 	_init_bridge()
 	_create_home()
+	# _rebuild_platforms() normally only runs in _process(), so without this
+	# call the very first flight target would be chosen against an empty
+	# platforms list (no Dock line, no home crown — let alone any real
+	# windows, which the poll thread hasn't reported yet either) and always
+	# fall back to diving straight down.
+	_rebuild_platforms()
+	if _is_bird():
+		_begin_flight()  # give the initial fall a real flight target
 	if FileAccess.file_exists(_helper_path):
 		_thread = Thread.new()
 		_thread.start(_poll_windows.bind(OS.get_process_id()))
@@ -217,17 +278,30 @@ func _create_home() -> void:
 	home_node = HomeArt.new()
 	home_win.add_child(home_node)
 	add_child(home_win)
+	# Re-assert per-pixel transparency now that the OS window exists — set
+	# only before add_child it has been seen to come up gray.
+	home_win.transparent = true
+	home_win.transparent_bg = true
 	home_win.window_input.connect(_on_home_input)
 	var usable := DisplayServer.screen_get_usable_rect(win.current_screen)
 	home_win.position = Vector2i(usable.end.x - HOME_W - 80, usable.end.y - int(HOME_FLOOR))
+	# Only the ball itself should catch clicks — the rest of this (mostly
+	# empty) window passes them through to whatever is underneath.
+	var bm := 24.0
+	home_win.mouse_passthrough_polygon = PackedVector2Array([
+		Vector2(HOME_DOOR_X - HomeArt.BALL_R - bm, HOME_FLOOR - HomeArt.BALL_R * 2.0 - bm),
+		Vector2(HOME_DOOR_X + HomeArt.BALL_R + bm, HOME_FLOOR - HomeArt.BALL_R * 2.0 - bm),
+		Vector2(HOME_DOOR_X + HomeArt.BALL_R + bm, HOME_FLOOR + 8.0),
+		Vector2(HOME_DOOR_X - HomeArt.BALL_R - bm, HOME_FLOOR + 8.0),
+	])
 
 
-## Where feet stand when at the doorway, in global pixels.
+## Where feet stand when at the ball, in global pixels.
 func _door_feet() -> Vector2:
 	return Vector2(home_win.position) + Vector2(HOME_DOOR_X, HOME_FLOOR)
 
 
-## Keeps the house sitting on the Dock line (the user drags it only sideways).
+## Keeps the ball sitting on the Dock line (the user drags it only sideways).
 func _snap_home() -> void:
 	var usable := DisplayServer.screen_get_usable_rect(win.current_screen)
 	home_win.position = Vector2i(
@@ -245,7 +319,7 @@ func _on_home_input(event: InputEvent) -> void:
 		else:
 			_home_dragging = false
 			if not _home_drag_moved:
-				# A click on the house summons the cat home, or lets it out.
+				# A click on the ball recalls the pet into it, or lets it out.
 				if state == State.HOME:
 					_start_exit_home()
 				else:
@@ -368,9 +442,11 @@ func _rebuild_platforms() -> void:
 		if r.size.x < MIN_LEDGE:
 			continue
 		var y := r.position.y
-		# No room for the pet above edges too close to the menu bar,
-		# and edges at/under the Dock line are pointless.
-		if y < usable.position.y + 40.0 or y > usable.end.y - 2.0:
+		# No room for the pet above edges too close to the menu bar (it
+		# needs its own height of headroom), and edges at/under the Dock
+		# line are pointless.
+		if y < usable.position.y + _m().height * SPRITE_SCALE * 0.75 \
+				or y > usable.end.y - 2.0:
 			continue
 		var segs: Array[Vector2] = [Vector2(r.position.x, r.end.x)]
 		for j in i:  # windows in front of this one
@@ -385,7 +461,8 @@ func _rebuild_platforms() -> void:
 	for k in icons.size():
 		var c: Vector2 = icons[k] * sf
 		var y := c.y - icon_half
-		if y < usable.position.y + 40.0 or y > usable.end.y - 2.0:
+		if y < usable.position.y + _m().height * SPRITE_SCALE * 0.75 \
+				or y > usable.end.y - 2.0:
 			continue
 		var segs: Array[Vector2] = [Vector2(c.x - icon_half, c.x + icon_half)]
 		for r in scaled:
@@ -394,12 +471,12 @@ func _rebuild_platforms() -> void:
 		for s in segs:
 			if s.y - s.x >= MIN_ICON_LEDGE:
 				platforms.append({ id = -1000 - k, y = y, x1 = s.x, x2 = s.y })
-	# The house's roof ridge is a wonderful perch.
+	# The ball's crown is a wonderful (if precarious) circus perch.
 	if home_win:
 		var hp := Vector2(home_win.position)
 		platforms.append({
-			id = -2000, y = hp.y + 24.0,
-			x1 = hp.x + HOME_DOOR_X - 20.0, x2 = hp.x + HOME_DOOR_X + 20.0,
+			id = -2000, y = hp.y + HOME_FLOOR - HomeArt.BALL_R * 2.0,
+			x1 = hp.x + HOME_DOOR_X - 41.0, x2 = hp.x + HOME_DOOR_X + 41.0,
 		})
 	# The Dock: the usable rect excludes it, so its top edge is the usable
 	# rect's bottom. (With no Dock this is simply the screen bottom.)
@@ -430,6 +507,18 @@ func _feet_y() -> float:
 	return pos_f.y + FOOT_Y
 
 
+## Moves the OS window to pos_f, pre-clamped to where macOS will actually
+## allow it (below the menu bar); the shortfall becomes vis_off. Clamping
+## ourselves keeps vis_off deterministic — reading win.position back after a
+## refused move returns stale values depending on frame timing.
+func _place_window() -> void:
+	var want := Vector2i(pos_f.round())
+	var top := DisplayServer.screen_get_usable_rect(win.current_screen).position.y
+	var wp := Vector2i(want.x, maxi(want.y, top))
+	win.position = wp
+	vis_off = Vector2(want - wp)
+
+
 ## The platform we're currently standing on, or {} if it's gone.
 func _current_platform() -> Dictionary:
 	var fx := _feet_x()
@@ -447,16 +536,55 @@ func _stick_to_ground() -> bool:
 		_start_fall()
 		return false
 	pos_f.y = p.y - FOOT_Y
-	win.position = Vector2i(pos_f.round())
+	_place_window()
 	return true
+
+
+func _is_bird() -> bool:
+	return FORM_DEFS[form].bird
+
+
+## Idle-pose content metrics of the current form, in sprite pixels.
+func _m() -> Dictionary:
+	return _metrics.get(form, { half_w = 12.0, height = 24.0 })
+
+
+## A point just above the character's head (dx in window px).
+func _above_head(dx: float = 0.0) -> Vector2:
+	return Vector2(CENTER.x + dx, FOOT_Y - _m().height * SPRITE_SCALE - 50.0)
+
+
+## Only the box around the sprite should catch the mouse — everything else
+## in this big window must pass clicks through to whatever is underneath.
+func _update_passthrough() -> void:
+	if state == State.HOME:
+		return  # entering HOME already set the tiny all-passthrough triangle
+	var sheets: Dictionary = _sprites.get(form, {})
+	if not sheets.has(_anim_name):
+		# Sheet failed to load — the pet draws nothing (see _draw_sprite), so
+		# don't let the big invisible window swallow every click either; a
+		# truly empty polygon disables passthrough entirely (opposite of what
+		# we want here), so use the same all-passthrough sentinel as HOME.
+		win.mouse_passthrough_polygon = PackedVector2Array([
+			Vector2(0, 0), Vector2(1, 0), Vector2(0, 1)])
+		return
+	var sp: Dictionary = sheets[_anim_name]
+	var margin := 16.0
+	var hw: float = sp.half_w * SPRITE_SCALE + margin
+	var top: float = FOOT_Y - (sp.foot - sp.top) * SPRITE_SCALE - margin
+	var bot := FOOT_Y + margin
+	win.mouse_passthrough_polygon = PackedVector2Array([
+		Vector2(CENTER.x - hw, top) + vis_off, Vector2(CENTER.x + hw, top) + vis_off,
+		Vector2(CENTER.x + hw, bot) + vis_off, Vector2(CENTER.x - hw, bot) + vis_off,
+	])
 
 
 func _start_fall() -> void:
 	if state == State.NAP:
 		nap_in = randf_range(NAP_MIN, NAP_MAX)  # rude awakening
 	land_squish = 0.0
-	if form == Form.PARROT:
-		_begin_flight()  # a parrot doesn't fall — it takes off
+	if _is_bird():
+		_begin_flight()  # a bird doesn't fall — it takes off
 	else:
 		vy = 0.0
 		ground_id = -2
@@ -533,7 +661,7 @@ func _begin_flight() -> void:
 ## Instead it glides down onto the same ledge gravity would find (with a small
 ## upward snap, so releasing it slightly onto a window still perches on it).
 func _drop_release() -> void:
-	if form != Form.PARROT:
+	if not _is_bird():
 		_start_fall()
 		return
 	land_squish = 0.0
@@ -563,6 +691,21 @@ func _drop_release() -> void:
 ## true once it has landed on fly_target_ground.
 func _fly_step(delta: float) -> bool:
 	fly_bob_time += delta
+	# Track a real app window's current position while flying toward it, so
+	# dragging the window mid-flight doesn't leave the bird arriving at a
+	# stale, now-empty point (it would self-correct into a fall a frame
+	# later, but reads as a visible teleport-then-drop glitch). The Dock
+	# line, home crown, and desktop icons don't need this: they're either
+	# effectively stationary or, for the home door, already retargeted at
+	# takeoff by _begin_flight()'s own going_home branch.
+	if fly_target_ground > 0:
+		for p in platforms:
+			if p.id == fly_target_ground:
+				var lo: float = p.x1 + FOOT_HALF
+				var hi: float = p.x2 - FOOT_HALF
+				fly_target.x = clampf(fly_target.x, lo, hi) if lo <= hi else (p.x1 + p.x2) * 0.5
+				fly_target.y = p.y
+				break
 	var feet := Vector2(_feet_x(), _feet_y())
 	var to_target := fly_target - feet
 	if to_target.length() <= FLY_ARRIVE_DIST:
@@ -570,14 +713,14 @@ func _fly_step(delta: float) -> bool:
 		ground_id = fly_target_ground
 		vy = 0.0
 		land_squish = 0.25
-		win.position = Vector2i(pos_f.round())
+		_place_window()
 		return true
 	var dir := to_target.normalized()
 	if absf(dir.x) > 0.05:
 		facing = 1 if dir.x > 0.0 else -1
 	pos_f += dir * FLY_SPEED * delta
 	pos_f.y += sin(fly_bob_time * 6.0) * 0.5
-	win.position = Vector2i(pos_f.round())
+	_place_window()
 	return false
 
 
@@ -599,20 +742,24 @@ func _airborne_step(delta: float, steer: float) -> bool:
 				if best.is_empty() or p.y < best.y:
 					best = p
 	if best.is_empty():
-		# Safety net: never fall through the very bottom of the screen.
-		var scr := win.current_screen
-		var bottom := float(DisplayServer.screen_get_position(scr).y
-			+ DisplayServer.screen_get_size(scr).y)
-		if new_feet >= bottom:
-			best = { id = -1, y = bottom, x1 = 0.0, x2 = 0.0 }
+		# Safety net: never fall through the bottom of the usable screen
+		# area. This must match the real Dock-line platform's geometry
+		# exactly (same id -1, same y/x-range) — using the true physical
+		# screen bottom here instead used to place the pet below the
+		# taskbar, only for _current_platform() to find the real Dock entry
+		# next frame and snap it back up by the taskbar's height.
+		var usable := DisplayServer.screen_get_usable_rect(win.current_screen)
+		if new_feet >= float(usable.end.y):
+			best = { id = -1, y = float(usable.end.y),
+				x1 = float(usable.position.x), x2 = float(usable.end.x) }
 	if not best.is_empty():
 		pos_f.y = best.y - FOOT_Y
 		ground_id = best.id
 		vy = 0.0
 		land_squish = 0.3
-		win.position = Vector2i(pos_f.round())
+		_place_window()
 		return true
-	win.position = Vector2i(pos_f.round())
+	_place_window()
 	return false
 
 
@@ -622,7 +769,6 @@ func _airborne_step(delta: float, steer: float) -> bool:
 
 func _process(delta: float) -> void:
 	t += delta
-	_update_blink(delta)
 	_update_particles(delta)
 	_snap_home()
 	_rebuild_platforms()
@@ -654,7 +800,7 @@ func _process(delta: float) -> void:
 			elif randf() < delta * 0.006:
 				_head_home()  # every few minutes it goes home on its own
 			elif hunger > HUNGRY_AFTER and randf() < delta * 0.35:
-				_spawn(&"thought", CENTER + Vector2(38 * facing, -62))
+				_spawn(&"thought", _above_head(facing * (_m().half_w * SPRITE_SCALE + 70.0)))
 		State.WANDER:
 			_wander(delta)
 		State.EAT:
@@ -663,17 +809,20 @@ func _process(delta: float) -> void:
 				eat_progress += delta / 1.6
 				if eat_progress >= 1.0:
 					hunger = 0.0
-					_spawn(&"heart", CENTER + Vector2(0, -60))
+					_spawn(&"heart", _above_head())
 					state = _grounded_state()
 		State.NAP:
 			if _stick_to_ground():
 				state_timer -= delta
 				if fmod(t, 1.4) < delta:
-					_spawn(&"zzz", CENTER + Vector2(28 * facing, -48))
+					# +45: the sleeping pose lies much lower than the idle
+					# height _above_head assumes, minus a little breathing
+					# room above the body.
+					_spawn(&"zzz", _above_head(facing * 60.0) + Vector2(0, 45))
 				if state_timer <= 0.0:
 					_wake_up()
 		State.FALL:
-			if form == Form.PARROT:
+			if _is_bird():
 				if _fly_step(delta):
 					state = _grounded_state()
 			elif _airborne_step(delta, 0.0):
@@ -691,10 +840,11 @@ func _process(delta: float) -> void:
 			_go_home_tick(delta)
 		State.ENTER_HOME:
 			anim_progress += delta / ENTER_TIME
+			home_node.set_transfer("capture", anim_progress)
 			var door := _door_feet()
-			pos_f.x = lerpf(pos_f.x, door.x - CENTER.x, minf(anim_progress * 1.5, 1.0))
+			pos_f.x = lerpf(pos_f.x, door.x - CENTER.x, minf(anim_progress * 2.0, 1.0))
 			pos_f.y = door.y - FOOT_Y
-			win.position = Vector2i(pos_f.round())
+			_place_window()
 			if anim_progress >= 1.0:
 				going_home = false
 				state = State.HOME
@@ -703,25 +853,28 @@ func _process(delta: float) -> void:
 				visible = false
 				win.mouse_passthrough_polygon = PackedVector2Array([
 					Vector2(0, 0), Vector2(1, 0), Vector2(0, 1)])
+				home_node.set_transfer("", 0.0)
 				home_node.cat_inside = true
 				_write_state("home")
 				_run_hook("on_enter_home")
 		State.HOME:
-			pass  # the soul is in the robot now; the house's eyes blink for us
+			pass  # the soul is in the robot now; the ball wobbles for us
 		State.EXIT_HOME:
 			anim_progress += delta / ENTER_TIME
+			home_node.set_transfer("release", anim_progress)
 			pos_f = _door_feet() - Vector2(CENTER.x, FOOT_Y)
-			win.position = Vector2i(pos_f.round())
+			_place_window()
 			if anim_progress >= 1.0:
-				if form == Form.PARROT:
+				home_node.set_transfer("", 0.0)
+				if _is_bird():
 					_begin_flight()  # flies out and off to the nearest perch
 				else:
 					# Pop out with a little hop, away from the house wall.
 					var usable := DisplayServer.screen_get_usable_rect(win.current_screen)
 					var mid := (usable.position.x + usable.end.x) * 0.5
-					hop_vx = (1.0 if _feet_x() < mid else -1.0) * randf_range(130.0, 210.0)
+					hop_vx = (1.0 if _feet_x() < mid else -1.0) * randf_range(200.0, 320.0)
 					facing = 1 if hop_vx > 0.0 else -1
-					vy = -650.0
+					vy = -900.0
 					hop_crouch = 0.0
 					ground_id = -2
 					state = State.HOP
@@ -733,27 +886,90 @@ func _process(delta: float) -> void:
 				drag_moved = true
 			if drag_moved:
 				pos_f = Vector2(mouse - drag_offset)
-				win.position = mouse - drag_offset
+				_place_window()
 
-	# Shrink into / grow out of the doorway.
+	# Capture / release beam: while the ball is open the pet shrinks into (or
+	# grows out of) it, washing out to white-hot light, converging on the
+	# ball's center. Everything drawn is shifted by vis_off so the sprite sits
+	# where the physics says even when the OS refused to move the window that
+	# high.
 	if state == State.ENTER_HOME or state == State.EXIT_HOME:
-		var s := clampf(1.0 - anim_progress if state == State.ENTER_HOME else anim_progress,
-			0.0, 1.0)
-		scale = Vector2(s, s)
-		position = Vector2(CENTER.x, FOOT_Y) * (1.0 - s)
-		modulate.a = maxf(s, 0.15)
-	elif scale != Vector2.ONE:
+		var p := clampf(anim_progress, 0.0, 1.0)
+		var s: float
+		if state == State.ENTER_HOME:
+			# Ball opens (p<0.25), pet beams in (0.25..0.65), flash + close.
+			s = clampf(1.0 - (p - 0.25) / 0.4, 0.0, 1.0)
+		else:
+			# Flash builds (p<0.3), pet beams out (0.3..0.75), ball closes.
+			s = clampf((p - 0.3) / 0.45, 0.0, 1.0)
+		var glow := (1.0 - s) * 6.0
+		scale = Vector2.ONE * maxf(s, 0.001)  # exactly 0 breaks the transform
+		position = Vector2(CENTER.x, FOOT_Y - HomeArt.BALL_CENTER_UP) * (1.0 - s) + vis_off
+		modulate = Color(1.0 + glow, 1.0 + glow, 1.0 + glow, clampf(s * 2.5, 0.0, 1.0))
+	else:
 		scale = Vector2.ONE
-		position = Vector2.ZERO
-		modulate.a = 1.0
+		position = vis_off
+		modulate = Color(1, 1, 1, 1)
+
+	# Advance the sprite animation; switching sheets restarts the clock.
+	var desired := _current_anim()
+	if desired.name != _anim_name:
+		_anim_name = desired.name
+		_anim_clock = 0.0
+	_anim_clock += delta * desired.speed
+	_update_passthrough()
+
+	if _snap_path != "" and t > _snap_at:
+		get_viewport().get_texture().get_image().save_png(_snap_path)
+		# The ball lives in its own window; save its view too (…-home.png).
+		home_win.get_viewport().get_texture().get_image().save_png(
+			_snap_path.get_basename() + "-home.png")
+		_snap_path = ""
 
 	if _debug and fmod(t, 1.0) < delta:
-		print("state=%-9s form=%-6s pos=%s ground=%d home=%s icons=[%s] ledges=%s" % [
-			State.keys()[state], Form.keys()[form], win.position, ground_id, home_win.position,
-			_icon_status,
+		print("state=%-9s form=%-10s anim=%-10s pos=%s vis=%d ground=%d home=%s icons=[%s] ledges=%s" % [
+			State.keys()[state], Form.keys()[form], _anim_name, Vector2i(pos_f.round()), int(vis_off.y),
+			ground_id, home_win.position, _icon_status,
 			platforms.map(func(p): return Vector2i(int(p.x1), int(p.y)))])
 
 	queue_redraw()
+
+
+## Which sprite animation the current state calls for, plus playback speed
+## and whether to freeze on the last frame instead of looping.
+func _current_anim() -> Dictionary:
+	var anims: Dictionary = FORM_DEFS[form].anims
+	var bird := _is_bird()
+	match state:
+		State.NAP:
+			return { name = anims.sleep, speed = 1.0, hold = false }
+		State.EAT:
+			return { name = anims.eat, speed = 1.0, hold = false }
+		State.DRAG:
+			if drag_moved:
+				return { name = anims.drag, speed = 1.0, hold = not bird }
+			return { name = anims.idle, speed = 1.0, hold = false }
+		State.WANDER:
+			return { name = anims.walk, speed = 1.0, hold = false }
+		State.GO_HOME:
+			return { name = anims.walk, speed = 1.3, hold = false }
+		State.ENTER_HOME, State.EXIT_HOME:
+			# Held still while the ball's beam does its thing.
+			return { name = anims.idle, speed = 1.0, hold = false }
+		State.FALL:
+			if bird:
+				return { name = anims.fly, speed = 1.0, hold = false }
+			return { name = anims.air, speed = 1.0, hold = true }
+		State.HOP:
+			if hop_crouch > 0.0:
+				return { name = anims.crouch, speed = 0.0, hold = false }  # crouch pose
+			return { name = anims.air, speed = 1.0, hold = true }
+		State.PLAY:
+			if ground_id == -2:
+				return { name = anims.fly if bird else anims.air, speed = 1.0, hold = not bird }
+			return { name = anims.walk, speed = 1.6, hold = false }
+		_:
+			return { name = anims.idle, speed = 1.0, hold = false }
 
 
 ## Consumes a command written to the bridge command file by an external
@@ -785,8 +1001,14 @@ func _grounded_state() -> State:
 
 ## Sends the cat toward its house (from anywhere).
 func _head_home() -> void:
-	if state == State.HOME or state == State.ENTER_HOME or state == State.GO_HOME \
-			or state == State.EXIT_HOME:
+	if state == State.HOME or state == State.ENTER_HOME or state == State.EXIT_HOME:
+		return
+	if going_home:
+		# Already on the way — calling this again (H, or a second bridge
+		# enter_home) cancels the trip instead of no-op'ing.
+		going_home = false
+		if state == State.GO_HOME:
+			state = State.IDLE
 		return
 	if state == State.NAP:
 		_wake_up()
@@ -794,7 +1016,7 @@ func _head_home() -> void:
 	going_home = true
 	if state == State.IDLE or state == State.WANDER or state == State.PLAY:
 		state = State.GO_HOME
-	elif form == Form.PARROT and state == State.FALL:
+	elif _is_bird() and state == State.FALL:
 		_begin_flight()  # already airborne — retarget straight to the door
 
 
@@ -802,8 +1024,9 @@ func _start_exit_home() -> void:
 	visible = true
 	win.mouse_passthrough_polygon = PackedVector2Array()  # clickable again
 	home_node.cat_inside = false
+	home_node.set_transfer("release", 0.0)
 	pos_f = _door_feet() - Vector2(CENTER.x, FOOT_Y)
-	win.position = Vector2i(pos_f.round())
+	_place_window()
 	anim_progress = 0.0
 	state = State.EXIT_HOME
 	_write_state("virtual")
@@ -822,6 +1045,13 @@ func _go_home_tick(delta: float) -> void:
 	if p.is_empty():
 		_start_fall()  # going_home persists through the fall
 		return
+	if absf(dxd) < 10.0 and p.id != -1:
+		# Already lined up with the door on x, but not the Dock line itself
+		# (e.g. perched on the home ball's own crown, directly above the
+		# door but ~70px too high) — standing still would never converge on
+		# the y threshold. Step off and let gravity/flight find the door.
+		_start_fall()
+		return
 	pos_f.y = p.y - FOOT_Y
 	facing = 1 if dxd > 0.0 else -1
 	pos_f.x += signf(dxd) * minf(HOME_SPEED * delta, absf(dxd))
@@ -829,7 +1059,7 @@ func _go_home_tick(delta: float) -> void:
 	if fx < p.x1 - LEDGE_MARGIN or fx > p.x2 + LEDGE_MARGIN:
 		_start_fall()  # marches right off the edge on its way home
 		return
-	win.position = Vector2i(pos_f.round())
+	_place_window()
 
 
 func _wander(delta: float) -> void:
@@ -849,7 +1079,7 @@ func _wander(delta: float) -> void:
 			# Sometimes it just walks off the edge.
 			var over: float = p.x2 + FOOT_HALF if wander_dir > 0 else p.x1 - FOOT_HALF
 			pos_f.x = over - CENTER.x
-			win.position = Vector2i(pos_f.round())
+			_place_window()
 			_start_fall()
 			return
 		wander_dir = -wander_dir
@@ -857,7 +1087,7 @@ func _wander(delta: float) -> void:
 		pos_f.x = clampf(fx, lo, hi) - CENTER.x
 	else:
 		pos_f.x = fx - CENTER.x
-	win.position = Vector2i(pos_f.round())
+	_place_window()
 	if state == State.WANDER and state_timer <= 0.0:
 		state = State.IDLE
 
@@ -865,7 +1095,7 @@ func _wander(delta: float) -> void:
 ## Picks a reachable ledge and starts a hop (or, for a parrot, a flight)
 ## toward it. Returns false if nothing is in range.
 func _try_hop() -> bool:
-	if form == Form.PARROT:
+	if _is_bird():
 		var options := _flight_candidates()
 		if options.is_empty():
 			return false
@@ -889,7 +1119,7 @@ func _try_hop() -> bool:
 			continue
 		# Solve the jump arc: apex comfortably above both ledges, then the
 		# horizontal speed that arrives at tx exactly when we come down to p.y.
-		var apex: float = minf(fy, p.y) - randf_range(80.0, 150.0)
+		var apex: float = minf(fy, p.y) - randf_range(200.0, 320.0)
 		var vy0 := -sqrt(2.0 * GRAVITY * (fy - apex))
 		var t_up := -vy0 / GRAVITY
 		var t_down := sqrt(2.0 * maxf(p.y - apex, 1.0) / GRAVITY)
@@ -947,8 +1177,9 @@ func _play(delta: float) -> void:
 		ground_id = -2
 		vy = JUMP_VY
 	elif absf(dx) <= 12.0 and mouse.y >= _feet_y() - 90.0 and randf() < delta * 1.2:
-		_spawn(&"heart", CENTER + Vector2(randf_range(-14, 14), -58))  # caught it!
-	win.position = Vector2i(pos_f.round())
+		# Caught it! A little burst of musical notes overhead.
+		_spawn(&"notes", _above_head(randf_range(-40.0, 40.0)) + Vector2(0, 65))
+	_place_window()
 
 
 # ----------------------------------------------------------------------------
@@ -974,7 +1205,7 @@ func _input(event: InputEvent) -> void:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
 				press_pos = DisplayServer.mouse_get_position()
-				drag_offset = press_pos - win.position
+				drag_offset = press_pos - Vector2i(pos_f.round())
 				drag_moved = false
 				going_home = false  # picking it up interrupts the trip home
 				if state == State.NAP:
@@ -992,8 +1223,9 @@ func _input(event: InputEvent) -> void:
 
 
 func _toggle_form() -> void:
-	form = Form.PARROT if form == Form.CAT else Form.CAT
-	if form == Form.PARROT and (state == State.FALL or state == State.HOP):
+	form = ((form + 1) % FORM_DEFS.size()) as Form
+	_load_form_sprites(form)
+	if _is_bird() and (state == State.FALL or state == State.HOP):
 		_begin_flight()  # mid-air shapeshift — give it a real destination
 
 
@@ -1006,9 +1238,9 @@ func _toggle_play() -> void:
 		play_timer = PLAY_LENGTH
 		if state == State.NAP:
 			_wake_up()
-		if state == State.IDLE or state == State.WANDER:
-			state = State.PLAY
-		_spawn(&"heart", CENTER + Vector2(0, -64))
+		if state == State.IDLE or state == State.WANDER or state == State.GO_HOME:
+			state = State.PLAY  # also cancels an in-progress trip home
+		_spawn(&"notes", _above_head() + Vector2(0, 65))
 	elif state == State.PLAY:
 		state = State.IDLE
 
@@ -1016,7 +1248,7 @@ func _toggle_play() -> void:
 func _feed() -> void:
 	if state == State.EAT or state == State.FALL or state == State.DRAG \
 			or state == State.HOME or state == State.ENTER_HOME \
-			or state == State.EXIT_HOME:
+			or state == State.EXIT_HOME or state == State.HOP:
 		return
 	if state == State.NAP:
 		_wake_up()
@@ -1027,7 +1259,7 @@ func _feed() -> void:
 
 
 func _boop() -> void:
-	_spawn(&"heart", CENTER + Vector2(randf_range(-14, 14), -58))
+	_spawn(&"heart", _above_head(randf_range(-40.0, 40.0)))
 
 
 func _start_wander() -> void:
@@ -1047,16 +1279,6 @@ func _wake_up() -> void:
 	state = State.IDLE
 
 
-func _update_blink(delta: float) -> void:
-	if blink > 0.0:
-		blink -= delta
-	else:
-		blink_timer -= delta
-		if blink_timer <= 0.0:
-			blink = 0.12
-			blink_timer = randf_range(2.0, 5.0)
-
-
 func _spawn(kind: StringName, pos: Vector2) -> void:
 	particles.append({ kind = kind, pos = pos, age = 0.0 })
 
@@ -1065,26 +1287,29 @@ func _update_particles(delta: float) -> void:
 	for i in range(particles.size() - 1, -1, -1):
 		var p: Dictionary = particles[i]
 		p.age += delta
-		p.pos += Vector2(10.0 * sin(p.age * 3.0), -18.0) * delta
+		var v: Dictionary = _vfx.get(p.kind, {})
+		if not v.is_empty():
+			# VFX overlays animate inside their frames — stationary, one
+			# play-through, then gone.
+			if p.age >= v.frames.size() * v.ft:
+				particles.remove_at(i)
+			continue
+		p.pos += Vector2(22.0 * sin(p.age * 3.0), -42.0) * delta
 		if p.age >= 2.2:
 			particles.remove_at(i)
 
 
 # ----------------------------------------------------------------------------
-# Drawing — the whole cat is procedural, no image assets needed.
+# Drawing — the characters come from PMD sprite sheets; the shadow, cookie,
+# and floating particles are still drawn procedurally.
 # ----------------------------------------------------------------------------
 
 func _draw() -> void:
-	var napping := state == State.NAP
-	var eating := state == State.EAT
-	var playing := state == State.PLAY and ground_id != -2
-	var breathe := sin(t * (1.6 if napping else 3.2)) * (0.045 if napping else 0.025)
 	var airborne := (state == State.DRAG and drag_moved) or state == State.FALL \
 		or ground_id == -2
 
-	# Shadow: an ellipse resting ON the ledge (entirely above the feet line so
-	# the Dock — which draws over us — can't cut it off), clipped horizontally
-	# to the ledge so it never hangs past an edge into thin air.
+	# Shadow: the sheet's own pixel shadow resting on the ledge, clipped
+	# horizontally to the ledge so it never hangs past an edge into thin air.
 	if not airborne:
 		var lo := -INF
 		var hi := INF
@@ -1092,133 +1317,79 @@ func _draw() -> void:
 		if not p.is_empty() and p.x2 > p.x1:
 			lo = p.x1 - pos_f.x
 			hi = p.x2 - pos_f.x
-		_draw_shadow(lo, hi)
+		_draw_pet_shadow(lo, hi)
 
-	# Dangling feet while carried or falling (cat only — a flying parrot
-	# tucks its feet; its wings carry the "airborne" read instead)
-	if airborne and form == Form.CAT:
-		var kick := sin(t * 10.0) * 5.0
-		draw_set_transform(CENTER, 0.0, Vector2.ONE)
-		draw_circle(Vector2(-18, 44 + kick), 8.0, BODY_COLOR.darkened(0.08))
-		draw_circle(Vector2(18, 44 - kick), 8.0, BODY_COLOR.darkened(0.08))
+	_draw_sprite()
 
-	# Squash: with breathing, when napping, on landing, and while crouching
-	# before a (cat-only) hop.
-	var squash := (0.12 if napping else 0.0) + land_squish * 0.7 \
-		+ (0.18 if state == State.HOP and hop_crouch > 0.0 else 0.0)
-	var f := Vector2(facing * 6.0, -6.0)  # face shifts toward facing direction
-	var eyes_closed := napping or blink > 0.0
-
-	if form == Form.CAT:
-		# Tail
-		draw_set_transform(CENTER, 0.0, Vector2.ONE)
-		var tail_speed := 9.0 if (airborne or playing) else (2.0 if napping else 5.0)
-		var tail_points := PackedVector2Array()
-		for i in 12:
-			var u := i / 11.0
-			var wag := (0.6 if napping else 1.0) * sin(t * tail_speed + u * 3.0)
-			tail_points.append(Vector2(
-				-facing * (38.0 + u * 26.0),
-				22.0 - u * 30.0 + wag * 7.0 * u
-			))
-		draw_polyline(tail_points, BODY_COLOR.darkened(0.12), 9.0, true)
-
-		# Body (squishes with breathing)
-		draw_set_transform(CENTER, 0.0, Vector2(1.0 + breathe + squash, 1.0 - breathe - squash))
-		draw_circle(Vector2.ZERO, 44.0, BODY_COLOR)
-		draw_set_transform(CENTER + Vector2(0, 12), 0.0, Vector2(1.0 + breathe, 0.8))
-		draw_circle(Vector2.ZERO, 28.0, BELLY_COLOR)
-
-		# Ears
-		draw_set_transform(CENTER, 0.0, Vector2(1.0, 1.0 - squash))
-		for side in [-1, 1]:
-			var base := Vector2(side * 26.0, -32.0)
-			var flick := 2.0 * sin(t * 7.0 + side) * (0.0 if napping else 1.0)
-			draw_colored_polygon(PackedVector2Array([
-				base + Vector2(-11, 6), base + Vector2(11, 6), base + Vector2(side * 4 + flick, -20)
-			]), BODY_COLOR.darkened(0.05))
-			draw_colored_polygon(PackedVector2Array([
-				base + Vector2(-5, 3), base + Vector2(5, 3), base + Vector2(side * 2 + flick, -12)
-			]), Color("e8896b"))
-
-		# Face
-		draw_set_transform(CENTER + f, 0.0, Vector2.ONE)
-		for side in [-1, 1]:
-			var e := Vector2(side * 15.0, -6.0)
-			if eyes_closed:
-				# Gentle closed-eye arcs
-				draw_arc(e + Vector2(0, 1), 5.0, PI * 0.15, PI * 0.85, 8, DARK, 2.4, true)
-			else:
-				var pupil := 6.0 if (airborne or playing) else 5.0  # wide-eyed
-				draw_circle(e, pupil, DARK)
-				draw_circle(e + Vector2(1.5, -1.5), 1.7, Color.WHITE)
-				if playing:
-					draw_circle(e + Vector2(-1.5, 1.0), 1.0, Color.WHITE)  # sparkle
-		# Blush
-		draw_circle(Vector2(-22, 4), 5.0, BLUSH)
-		draw_circle(Vector2(22, 4), 5.0, BLUSH)
-		# Nose + mouth
-		draw_circle(Vector2(0, 3), 2.6, Color("d96c5f"))
-		if eating:
-			var chomp: float = 3.0 + 3.0 * absf(sin(t * 12.0))
-			draw_circle(Vector2(0, 11), chomp, DARK)
-		elif airborne:
-			draw_circle(Vector2(0, 11), 3.0, DARK)  # little surprised "o"
-		elif napping:
-			draw_arc(Vector2(0, 10), 4.0, PI * 0.1, PI * 0.9, 8, DARK, 2.0, true)
-		elif playing:
-			# Big open smile
-			draw_arc(Vector2(0, 9), 5.5, PI * 0.08, PI * 0.92, 10, DARK, 2.4, true)
-		elif hunger > HUNGRY_AFTER:
-			# Sad little mouth when hungry
-			draw_arc(Vector2(0, 14), 5.0, PI * 1.15, PI * 1.85, 8, DARK, 2.0, true)
-		else:
-			draw_arc(Vector2(-3, 8), 3.0, PI * 0.1, PI * 0.9, 8, DARK, 2.0, true)
-			draw_arc(Vector2(3, 8), 3.0, PI * 0.1, PI * 0.9, 8, DARK, 2.0, true)
-		# Whiskers
-		for side in [-1, 1]:
-			for w in 2:
-				var y := 2.0 + w * 5.0
-				draw_line(Vector2(side * 24.0, y), Vector2(side * 38.0, y - 2.0 + w * 4.0),
-					Color(DARK, 0.5), 1.4, true)
-	else:
-		_draw_parrot(napping, eating, playing, breathe, squash, airborne, eyes_closed, f)
-
-	# Cookie being eaten
-	if eating:
+	# Cookie being eaten (held in front of the snout/beak)
+	if state == State.EAT:
 		var cookie_scale := 1.0 - eat_progress
 		if cookie_scale > 0.05:
-			var anchor := (Vector2(facing * 30.0, 14.0) if form == Form.CAT
-				else Vector2(facing * 32.0, -20.0))
-			var cookie_pos := CENTER + f + anchor
+			var mtr := _m()
+			var cookie_pos := Vector2(
+				CENTER.x + facing * (mtr.half_w * SPRITE_SCALE + 30.0),
+				FOOT_Y - mtr.height * SPRITE_SCALE * 0.45)
 			draw_set_transform(cookie_pos, 0.0, Vector2(cookie_scale, cookie_scale))
-			draw_circle(Vector2.ZERO, 11.0, Color("c98a4b"))
-			for chip in [Vector2(-4, -3), Vector2(4, -1), Vector2(-1, 5)]:
-				draw_circle(chip, 2.0, Color("6b4226"))
+			draw_circle(Vector2.ZERO, 28.0, Color("c98a4b"))
+			for chip in [Vector2(-10, -8), Vector2(10, -3), Vector2(-3, 12)]:
+				draw_circle(chip, 5.0, Color("6b4226"))
 
 	# Floating particles
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-	var font := ThemeDB.fallback_font
 	for p in particles:
 		var alpha: float = clampf(1.0 - p.age / 2.2, 0.0, 1.0)
 		match p.kind:
 			&"heart":
-				_draw_heart(p.pos, 1.0 + p.age * 0.2, Color(1.0, 0.42, 0.5, alpha))
-			&"zzz":
-				var size := int(14 + p.age * 6)
-				draw_string(font, p.pos, "z", HORIZONTAL_ALIGNMENT_LEFT, -1, size,
-					Color(0.45, 0.55, 0.9, alpha))
+				_draw_heart(p.pos, 2.5 + p.age * 0.5, Color(1.0, 0.42, 0.5, alpha))
+			&"notes", &"zzz":
+				_draw_vfx(p)
 			&"thought":
-				draw_circle(p.pos, 13.0, Color(1, 1, 1, alpha * 0.85))
-				draw_circle(p.pos + Vector2(-12, 12), 4.0, Color(1, 1, 1, alpha * 0.7))
-				draw_circle(p.pos, 6.0, Color("c98a4b", alpha))
+				draw_circle(p.pos, 34.0, Color(1, 1, 1, alpha * 0.85))
+				draw_circle(p.pos + Vector2(-30, 30), 10.0, Color(1, 1, 1, alpha * 0.7))
+				draw_circle(p.pos, 16.0, Color("c98a4b", alpha))
 
 
-## Shadow ellipse whose bottom touches the feet line, clipped to [lo, hi]
-## (the ledge's extent in window-local x).
-func _draw_shadow(lo: float, hi: float) -> void:
-	var rx := 44.0
-	var ry := 9.0
+## The character's PMD pixel shadow for the current frame — the sheet's
+## `<Anim>-Shadow.png` marker recolored black at load — drawn translucent
+## under the sprite exactly where the sheet places it (ellipse centered on
+## the feet line), clipped to [lo, hi] (the ledge's extent in window-local
+## x). Falls back to the smooth ellipse for sheets without a shadow file.
+func _draw_pet_shadow(lo: float, hi: float) -> void:
+	var fi := _frame_info()
+	if fi.is_empty() or fi.sp.shadow == null:
+		_draw_shadow(lo, hi, _m().half_w * SPRITE_SCALE * 1.15)
+		return
+	var sp: Dictionary = fi.sp
+	# A ledge narrower than the shadow itself (the ball's crown, mostly)
+	# shrinks the whole shadow to fit instead of chopping its sides off;
+	# clipping is kept for the ordinary near-an-edge overhang case.
+	var k := 1.0
+	var sw: float = sp.shalf * 2.0 * SPRITE_SCALE
+	if hi - lo < sw:
+		k = maxf((hi - lo) / sw, 0.3)
+	var sx: float = (1.0 + fi.squash) * (-1.0 if fi.flip else 1.0) * k
+	var sy: float = (1.0 - fi.squash) * k
+	# The ledge interval mapped into the sprite's local (scaled/flipped) space.
+	var a: float = (lo - CENTER.x) / sx
+	var b: float = (hi - CENTER.x) / sx
+	var w: float = sp.fw * SPRITE_SCALE
+	var x0: float = maxf(-w * 0.5, minf(a, b))
+	var x1: float = minf(w * 0.5, maxf(a, b))
+	if x1 <= x0:
+		return
+	var src_x: float = (int(sp.col0) + fi.idx) * sp.fw + x0 / SPRITE_SCALE + sp.fw * 0.5
+	draw_set_transform(Vector2(CENTER.x, FOOT_Y), 0.0, Vector2(sx, sy))
+	draw_texture_rect_region(sp.shadow,
+		Rect2(x0, -sp.foot * SPRITE_SCALE, x1 - x0, sp.fh * SPRITE_SCALE),
+		Rect2(src_x, fi.row * sp.fh, (x1 - x0) / SPRITE_SCALE, sp.fh),
+		Color(1, 1, 1, 0.20))
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+
+## Fallback shadow ellipse whose bottom touches the feet line, clipped to
+## [lo, hi] (the ledge's extent in window-local x). rx varies per character.
+func _draw_shadow(lo: float, hi: float, rx: float) -> void:
+	var ry := rx * 0.2
 	var cy := FOOT_Y - ry
 	var pts := PackedVector2Array()
 	for i in 28:
@@ -1231,69 +1402,227 @@ func _draw_shadow(lo: float, hi: float) -> void:
 	draw_colored_polygon(pts, Color(0, 0, 0, 0.16))
 
 
-## Draws a little green parrot in place of the cat's body, tail, and face —
-## same shared shadow/particles/cookie as the cat, drawn around the same
-## CENTER/FOOT_Y frame so the two forms share identical footing.
-func _draw_parrot(napping: bool, eating: bool, playing: bool, breathe: float,
-		squash: float, airborne: bool, eyes_closed: bool, f: Vector2) -> void:
-	var body_c := Color("3ba84a")
-	var head_c := Color("4bc95a")
-	var wing_c := Color("2a8a38")
-	var beak_c := Color("f2913a")
-	var tail_c := Color("d94433")
-	var origin := CENTER + Vector2(0, 8)
-
-	var flap := 0.0
-	if airborne:
-		flap = sin(t * 16.0)
-	elif not napping:
-		flap = sin(t * 3.0) * 0.05  # gentle resting ruffle
-
-	# Tail
-	var tail_speed := 9.0 if (airborne or playing) else (2.0 if napping else 4.0)
-	var wag := sin(t * tail_speed) * (0.05 if napping else 0.15)
-	draw_set_transform(origin, wag, Vector2(facing, 1.0))
-	draw_colored_polygon(PackedVector2Array([
-		Vector2(-14, -6), Vector2(-44, 4), Vector2(-40, 14), Vector2(-12, 10)
-	]), tail_c)
-
-	# Body
-	draw_set_transform(origin, 0.0, Vector2(1.0 + breathe + squash, 1.0 - breathe - squash))
-	draw_circle(Vector2.ZERO, 34.0, body_c)
-
-	# Wing (single side-view wing; flaps briskly while flying)
-	var wing_pivot := Vector2(-4, -8)
-	draw_set_transform(origin + wing_pivot * Vector2(facing, 1.0), flap * facing,
-		Vector2(facing, 1.0))
-	draw_colored_polygon(PackedVector2Array([
-		Vector2(0, 0), Vector2(-11, 32), Vector2(7, 36), Vector2(15, 4)
-	]), wing_c)
-
-	# Head
-	draw_set_transform(origin, 0.0, Vector2.ONE)
-	var head_offset := Vector2(facing * 20.0, -28.0) + f * 0.4
-	draw_circle(head_offset, 19.0, head_c)
-	draw_circle(head_offset + Vector2(-facing * 5.0, 5.0), 5.0, Color("f2e7a0"))  # cheek patch
-
-	# Eyes
-	var eye_pos := head_offset + Vector2(facing * 6.0, -4.0)
-	if eyes_closed:
-		draw_line(eye_pos + Vector2(-4, 0), eye_pos + Vector2(4, 0), DARK, 2.2, true)
+## Sheet + frame index + row/flip/squash for the current animation state,
+## shared by the sprite and its shadow. {} while sheets are missing.
+func _frame_info() -> Dictionary:
+	var sheets: Dictionary = _sprites.get(form, {})
+	if not sheets.has(_anim_name):
+		return {}
+	var sp: Dictionary = sheets[_anim_name]
+	var flip := false
+	var row := 0
+	if int(sp.rows) >= 8:
+		row = 2 if facing > 0 else 6  # PMD rows: 0=down, 2=right, 4=up, 6=left
 	else:
-		var pupil := 6.0 if (airborne or playing) else 5.0
-		draw_circle(eye_pos, pupil, Color.WHITE)
-		draw_circle(eye_pos + Vector2(facing * 1.5, -1.0), pupil * 0.45, DARK)
-		if playing:
-			draw_circle(eye_pos + Vector2(-facing * 1.0, 1.0), 1.1, Color.WHITE)  # sparkle
+		flip = facing < 0  # single-direction sheet — mirror it instead
+	return {
+		sp = sp,
+		idx = _anim_frame_index(sp, _current_anim().hold),
+		row = row, flip = flip,
+		squash = land_squish * 0.5 \
+			+ (0.15 if state == State.HOP and hop_crouch > 0.0 else 0.0),
+	}
 
-	# Beak, with a little dark chomp mark while eating
-	var beak_root := head_offset + Vector2(facing * 16.0, 3.0)
-	draw_colored_polygon(PackedVector2Array([
-		beak_root + Vector2(0, -7), beak_root + Vector2(facing * 13.0, -1.0), beak_root + Vector2(0, 5)
-	]), beak_c)
-	if eating:
-		var chomp: float = 2.0 + 2.0 * absf(sin(t * 12.0))
-		draw_circle(beak_root + Vector2(facing * 6.0, -1.0), chomp, DARK)
+
+## Draws the current character's animation frame, anchored so the sprite's
+## content bottom (its feet) sits on the FOOT_Y line.
+func _draw_sprite() -> void:
+	var fi := _frame_info()
+	if fi.is_empty():
+		return  # sheets missing — pet stays functional, just invisible
+	var sp: Dictionary = fi.sp
+	var w: float = sp.fw * SPRITE_SCALE
+	var h: float = sp.fh * SPRITE_SCALE
+	var foot: float = sp.foot * SPRITE_SCALE
+	draw_set_transform(Vector2(CENTER.x, FOOT_Y), 0.0,
+		Vector2((1.0 + fi.squash) * (-1.0 if fi.flip else 1.0), 1.0 - fi.squash))
+	draw_texture_rect_region(sp.tex,
+		Rect2(-w * 0.5, -foot, w, h),
+		Rect2((int(sp.col0) + fi.idx) * sp.fw, fi.row * sp.fh, sp.fw, sp.fh))
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+
+## Current frame index from the animation clock and per-frame durations.
+func _anim_frame_index(sp: Dictionary, hold: bool) -> int:
+	var durs: Array = sp.durs
+	if durs.is_empty():
+		return 0
+	var total: float = sp.total
+	if hold and _anim_clock >= total:
+		return durs.size() - 1
+	var tt := fmod(_anim_clock, total)
+	for i in durs.size():
+		tt -= durs[i]
+		if tt < 0.0:
+			return i
+	return durs.size() - 1
+
+
+## Loads one character's sheets straight from disk (no editor import needed):
+## parses AnimData.xml for frame sizes and durations, then finds the feet
+## line of each sheet by scanning frame 0's alpha.
+func _load_form_sprites(fi: int) -> void:
+	if _sprites.has(fi):
+		return
+	var def: Dictionary = FORM_DEFS[fi]
+	var dir := ProjectSettings.globalize_path("res://sprites/" + def.name)
+	var xml := FileAccess.get_file_as_string(dir.path_join("AnimData.xml"))
+	if xml == "":
+		push_warning("sprites/%s/AnimData.xml not found — %s will be invisible."
+			% [def.name, def.name])
+		_sprites[fi] = {}
+		return
+	var info := {}  # anim name -> {fw, fh, durs}
+	for block in xml.split("<Anim>"):
+		if not (block.contains("</Name>") and block.contains("<FrameWidth>")):
+			continue  # header junk or CopyOf-alias entries without own sheet
+		var aname := block.get_slice("<Name>", 1).get_slice("</Name>", 0)
+		var durs: Array[float] = []
+		var parts := block.split("<Duration>")
+		for i in range(1, parts.size()):
+			durs.append(parts[i].get_slice("</Duration>", 0).to_float() * SPRITE_TICK)
+		info[aname] = {
+			fw = block.get_slice("<FrameWidth>", 1).get_slice("</FrameWidth>", 0).to_int(),
+			fh = block.get_slice("<FrameHeight>", 1).get_slice("</FrameHeight>", 0).to_int(),
+			durs = durs,
+		}
+	var sheets := {}
+	for spec in def.anims.values():
+		# spec is "Sheet" or "Sheet:first-last[:ticks]" (frame subset).
+		var aname: String = spec.get_slice(":", 0)
+		if spec == "" or sheets.has(spec) or not info.has(aname):
+			continue
+		var img := Image.load_from_file(dir.path_join(aname + "-Anim.png"))
+		if img == null:
+			continue
+		var meta: Dictionary = info[aname]
+		var fw: int = meta.fw
+		var fh: int = meta.fh
+		var rows := img.get_height() / fh
+		var durs: Array = meta.durs
+		var col0 := 0
+		if spec.contains(":"):
+			var rng: String = spec.get_slice(":", 1)
+			col0 = rng.get_slice("-", 0).to_int()
+			var last := mini(rng.get_slice("-", 1).to_int(), durs.size() - 1)
+			durs = durs.slice(col0, last + 1)
+			if spec.get_slice_count(":") > 2:
+				var tick: float = spec.get_slice(":", 2).to_float() * SPRITE_TICK
+				durs = durs.map(func(_d): return tick)
+		# Content bounds of the anim's first frame in the right-facing row
+		# (or the only row): the bottom anchors every anim on the same ground
+		# line, the full box drives the click-through region around the sprite.
+		var scan_row := 2 if rows >= 8 else 0
+		var minx := fw
+		var maxx := -1
+		var miny := fh
+		var maxy := -1
+		for y in fh:
+			for x in fw:
+				if img.get_pixel(col0 * fw + x, scan_row * fh + y).a > 0.1:
+					minx = mini(minx, x)
+					maxx = maxi(maxx, x)
+					miny = mini(miny, y)
+					maxy = maxi(maxy, y)
+		if maxy < 0:  # fully transparent frame — fall back to full frame
+			minx = 0
+			maxx = fw - 1
+			miny = 0
+			maxy = fh - 1
+		# The matching pixel shadow sheet (<Anim>-Shadow.png, same frame
+		# grid): PMD marks the shadow ellipse in blue/red/green/white size
+		# layers, centered on the frame's ground line — recolored to plain
+		# black here, translucency comes from the draw-time modulate.
+		var shadow_tex: ImageTexture = null
+		var shalf := fw * 0.5  # shadow content half-width, for narrow ledges
+		var simg := Image.load_from_file(dir.path_join(aname + "-Shadow.png"))
+		if simg != null and simg.get_size() == img.get_size():
+			var sminx := fw
+			var smaxx := -1
+			for y in fh:
+				for x in fw:
+					if simg.get_pixel(col0 * fw + x, scan_row * fh + y).a > 0.1:
+						sminx = mini(sminx, x)
+						smaxx = maxi(smaxx, x)
+			if smaxx >= 0:
+				shalf = maxf(fw * 0.5 - sminx, smaxx + 1 - fw * 0.5)
+			for y in simg.get_height():
+				for x in simg.get_width():
+					if simg.get_pixel(x, y).a > 0.1:
+						simg.set_pixel(x, y, Color.BLACK)
+			shadow_tex = ImageTexture.create_from_image(simg)
+		var total := 0.0
+		for d in durs:
+			total += d
+		sheets[spec] = {
+			tex = ImageTexture.create_from_image(img),
+			fw = fw, fh = fh, rows = rows, col0 = col0,
+			durs = durs, total = maxf(total, 0.01),
+			foot = float(maxy + 1), top = float(miny),
+			half_w = maxf(fw * 0.5 - minx, maxx + 1 - fw * 0.5),
+			shadow = shadow_tex, shalf = shalf,
+		}
+	_sprites[fi] = sheets
+	# Idle-pose metrics for shadow/particle/cookie placement.
+	if sheets.has(def.anims.idle):
+		var idle: Dictionary = sheets[def.anims.idle]
+		_metrics[fi] = {
+			half_w = maxf(idle.half_w, 4.0),
+			height = maxf(idle.foot - idle.top, 8.0),
+		}
+	else:
+		_metrics[fi] = { half_w = 12.0, height = 24.0 }
+
+
+## One frame of a move_VFX overlay animation, bottom-center anchored on the
+## particle's position, with a quick fade right at the end of its life.
+func _draw_vfx(p: Dictionary) -> void:
+	var v: Dictionary = _vfx.get(p.kind, {})
+	if v.is_empty():
+		return
+	var frames: Array = v.frames
+	var idx := clampi(int(p.age / v.ft), 0, frames.size() - 1)
+	var tex: Texture2D = frames[idx]
+	var tw: float = tex.get_width() * v.sc
+	var th: float = tex.get_height() * v.sc
+	var a := clampf((frames.size() * v.ft - p.age) / 0.25, 0.0, 1.0)
+	draw_texture_rect(tex, Rect2(p.pos.x - tw * 0.5, p.pos.y - th, tw, th),
+		false, Color(1, 1, 1, a))
+
+
+## Loads the move_VFX overlay animations played by _draw_vfx, straight from
+## disk like the character sheets: musical notes for play mode (0007/001,
+## one PNG per frame) and the wobbling Zzz bubble for naps (0078/<frame>/,
+## one PNG inside each numbered folder). Frame canvases vary per frame, so
+## they are drawn bottom-center anchored.
+func _load_vfx() -> void:
+	var notes: Array = []
+	var dir := ProjectSettings.globalize_path("res://sprites/move_VFX/0007/001")
+	var files: Array = Array(DirAccess.get_files_at(dir))
+	files = files.filter(func(f): return str(f).ends_with(".png"))
+	files.sort()
+	# 011.png is a baked-in one-frame "blink" (the right-hand note vanishes
+	# and pops back on 012) — natural at GBA frame rates, a flicker at ours.
+	# Without it the note simply drops out for good at 013.
+	files.erase("011.png")
+	for f in files:
+		var img := Image.load_from_file(dir.path_join(f))
+		if img != null:
+			notes.append(ImageTexture.create_from_image(img))
+	if notes.is_empty():
+		push_warning("sprites/move_VFX/0007/001 not found — play notes VFX disabled.")
+	else:
+		_vfx[&"notes"] = { frames = notes, ft = 0.07, sc = VFX_SCALE * 1.5 }
+	var zzz: Array = []
+	for i in 8:
+		var img := Image.load_from_file(ProjectSettings.globalize_path(
+			"res://sprites/move_VFX/0078/%03d/000.png" % i))
+		if img != null:
+			zzz.append(ImageTexture.create_from_image(img))
+	if zzz.is_empty():
+		push_warning("sprites/move_VFX/0078 not found — nap Zzz VFX disabled.")
+	else:
+		_vfx[&"zzz"] = { frames = zzz, ft = 0.16, sc = VFX_SCALE }
 
 
 func _draw_heart(pos: Vector2, s: float, color: Color) -> void:
