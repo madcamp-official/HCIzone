@@ -65,6 +65,16 @@ lives at the repo root. Working branch: **`dev`**.
   only catches clicks in a box around the ball (passthrough polygon).
   The old "house not resized for the 4× characters" gap is thereby resolved —
   a Pokéball is *supposed* to dwarf what goes into it.
+- **Ball-crown perch no longer traps the pet.** The crown is only ~2 px of
+  standable width, so a cat couldn't pace off it and a gentle near-vertical
+  hop just dropped straight back onto it — pets got marooned up there.
+  `_try_hop` now (a) rejects any arc that would re-cross its own launch
+  ledge mid-descent (general fix: `x_cross` at `t = 2*t_up` must clear the
+  perch), (b) samples a wider spread + retries 5× per ledge off a "cramped"
+  perch so a clearing arc is actually found, and the IDLE handler hops off a
+  cramped perch eagerly (`_on_cramped_perch()`, ~1 s) instead of loitering or
+  napping on it. Verified: spawned onto the crown, leaves within ~1 s across
+  repeated runs. Birds were never affected (they fly off via `_fly_to`).
 - The pre-existing Godot game instance from ~10:53am was accidentally killed
   by an over-broad `pkill` during today's testing (mea culpa); a fresh
   instance running the new Pokéball code was launched in its place with
@@ -83,6 +93,26 @@ lives at the repo root. Working branch: **`dev`**.
   whole shadow scales down to fit instead of getting its sides chopped off
   (`shalf` in the sheet dict = shadow content half-width, measured at load).
   The ball's shadow in home.gd is a matching chunky 3-row pixel ellipse.
+  **The shadow is clipped at the feet line** — `_draw_pet_shadow` draws only
+  the frame rows down to `sp.foot` (dest y ≤ 0), so just the upper half of
+  the ellipse shows. Its lower half would hang below the ledge/Dock top and
+  either get occluded (reads as a shadow "behind" the window) or, if raised
+  to compensate, float detached and kill the flat 2D look. Clipping keeps it
+  tucked flat under the feet. (An earlier `slift`/lift attempt was reverted
+  for exactly that detached look — don't reintroduce a vertical shift.) The
+  ball's home.gd shadow rows were likewise nudged fully above its floor line.
+  **The side-edge clip is snapped to the pixel grid.** A pet at a window's
+  edge does get its shadow clipped (letting it float past the edge looked
+  worse), but `_draw_pet_shadow` snaps the clip to whole shadow pixels
+  (`col_l`/`col_r`, each source pixel = SPRITE_SCALE wide) so the cut lands
+  on a chunky pixel boundary instead of a razor-thin sub-pixel slice — it
+  reads as part of the pixel art. On a wide ledge (Dock) `col_l=0,
+  col_r=fw` → full shadow, unchanged. (To test the clip deterministically:
+  the CoreGraphics helper only reports layer-0 windows, so an always-on-top
+  test window isn't seen as a ledge, and the cluttered desktop fragments a
+  normal test window's ledge; a temporary `PET_TEST_SHADOW_HALF` hook that
+  forced a clip near the feet was used to verify the chunky edge, then
+  removed.)
 - **Play/nap effects are now PMD move_VFX sprites** (`_load_vfx` /
   `_draw_vfx` in pet.gd): play mode spawns the musical-notes animation
   (`sprites/move_VFX/0007/001`, 18 loose PNG frames, 88×48 canvas) on
@@ -95,13 +125,31 @@ lives at the repo root. Working branch: **`dev`**.
   internally). Notes frame `011.png` is deliberately skipped at load: it's
   a baked-in one-frame blink (right note vanishes, returns on 012) that
   reads as flicker at our 0.07 s/frame — and `017.png` never existed in the
-  rip (the blank half of the ending blink), so don't "fix" the numbering;
-  hearts (boop/feed) and the cookie thought bubble are still procedural.
+  rip (the blank half of the ending blink), so don't "fix" the numbering.
+  The heart burst (boop / fed, `0051/000`) and the hungry mark (`0121/004`)
+  are also move_VFX now — every floating particle goes through `_draw_vfx`;
+  the old procedural `_draw_heart` and cookie-thought-bubble were removed.
+  Single-folder VFX (notes/heart/hungry) load via `_load_vfx_folder`; missing
+  frame indices in a folder are just skipped (hungry has no `006.png`).
   `PET_NAP=1` env forces a quick nap for testing, and `PET_SNAP_AT`'s
-  floor is now 0.5 s to catch these short animations.
-- Nothing has been committed for today's work (resize/flight fix + Pokéball
-  home + pixel shadows + VFX) — say the word and it can be committed +
-  pushed to `dev`.
+  floor is now 0.5 s to catch these short animations. The heart/hungry
+  spawns sit `+95 px` below `_above_head` so they read as coming off the pet.
+- **The snack is an apple / golden apple** cropped from `sprites/items.png`
+  (Food row: apple at 100,61 and golden apple at 116,61, each 13×15;
+  `_load_snack` keys out the sheet's opaque teal bg). `_feed` rolls
+  `eat_gold` (golden 25%). It's held at each character's mouth via a per-form
+  `mouth = Vector2(fwd, up)` in `FORM_DEFS` (that anim's own sprite px:
+  forward of center, up from the feet line) — Eevee (6,11), Snorlax (7,24),
+  Fletchling (9,11). The eat anims (Snorlax Swing, Fletchling Attack) rotate
+  the mouth per frame, so a static anchor is a best-fit, not pixel-perfect.
+  The old procedural cookie was removed.
+- The resize/flight fix + Pokéball home + pixel shadows + VFX were committed
+  and pushed to `dev` as `e748721`.
+- The ball-crown-trap fix, the shadow-clip fixes, the heart/hungry +
+  apple-snack sprite swaps, and the per-character food mouth anchors (all in
+  `pet.gd`, plus the ball-shadow row nudge in `home.gd` and the new
+  `sprites/items.png`) are committed and pushed to `dev` on top of `e748721`.
+  Nothing is left uncommitted.
 
 ## What's implemented
 
@@ -178,5 +226,5 @@ lives at the repo root. Working branch: **`dev`**.
   of the old standalone `feature/parrot` demo into `dev`. They're not wired
   into `project.godot`'s `run/main_scene` (still `main.tscn` → `pet.gd`), so
   they're inert, but could be deleted for clarity.
-- Today's resize + flight-fix + Pokéball-home changes are uncommitted (see
-  "Right now" above).
+- Everything described above is committed on `dev`; the working tree is
+  clean (see "Right now").
