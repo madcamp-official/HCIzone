@@ -17,8 +17,8 @@ Requires **Godot 4.2+** (no install here yet: `brew install --cask godot`).
 | Input | What happens |
 |---|---|
 | Left-drag | Carry the cat anywhere on screen (its feet dangle) |
-| Left-click (no drag) | Boop — a heart floats up; wakes it from a nap |
-| Right-click | Feed it a cookie |
+| Left-click (no drag) | Boop — a heart burst pops up; wakes it from a nap |
+| Right-click | Feed it an apple (rarely a golden apple) |
 | Middle-click or `P` | Toggle play mode: it chases your cursor |
 | `B` | Cycle character: Eevee → Snorlax → Fletchling |
 | Click the Pokéball | Recall the pet into the ball / let it back out |
@@ -51,8 +51,10 @@ Requires **Godot 4.2+** (no install here yet: `brew install --cask godot`).
   pixel "Zzz" (the PMD sleep VFX from `sprites/move_VFX/0078`) hovers over
   it. Naps last
   12–25 s unless you wake it.
-- **Gets hungry** after ~45 s without food: mouth turns sad and it daydreams about
-  cookies in a thought bubble. Feeding resets hunger.
+- **Gets hungry** after ~45 s without food: a spiky pixel mark (the PMD VFX
+  from `sprites/move_VFX/0121/004`) flashes over its head. Feeding resets
+  hunger — and pops a heart burst (`sprites/move_VFX/0051/000`), the same one
+  a boop or being fed shows.
 - **Characters** (`B` cycles): Eevee and Snorlax use the cat behavior; sleep,
   play, feeding, wandering, and going home are identical — the only difference
   is how gaps between ledges are crossed: a crouch and a ballistic jump under

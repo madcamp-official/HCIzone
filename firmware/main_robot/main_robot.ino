@@ -62,8 +62,10 @@ const uint16_t TRIM_LEFT  = 100;
 const uint16_t TRIM_RIGHT = 100;
 
 // 회피/낭떠러지 복구 타이밍 (ms)
-const uint16_t BACKUP_MS = 350;    // 후진 시간
-const uint16_t TURN_MS   = 400;    // 회전 시간
+// 낭떠러지에서 확실히 벗어나려면: 후진으로 회전 반경을 책상 안에 넣고,
+// 회전은 크게(≈반 바퀴) 해서 "왔던 안전한 쪽"을 향하게 한다. (실측 튜닝)
+const uint16_t BACKUP_MS = 500;    // 후진 시간 (너무 크면 뒤쪽으로 떨어질 위험 — 센서 1개)
+const uint16_t TURN_MS   = 800;    // 회전 시간 (대략 반 바퀴 = 안쪽으로 방향 전환)
 
 // 초음파
 const uint16_t OBSTACLE_CM     = 5;    // 이 거리 이하면 장애물로 판단

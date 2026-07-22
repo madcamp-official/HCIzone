@@ -83,7 +83,9 @@ func _draw() -> void:
 		return
 	var ball_center := Vector2(CENTER_X, FLOOR_Y - BALL_CENTER_UP)
 	# Ground shadow — chunky pixel rows, matching the characters' PMD shadows.
-	for r in [[4.5, -1.5], [7.5, -0.5], [5.5, 0.5]]:  # [half-width, row] in ball px
+	# Kept entirely above the floor line so the Dock can't draw over its
+	# lower edge (the same "shadow behind the window" fix as the pets').
+	for r in [[4.5, -2.5], [7.5, -1.5], [5.5, -0.5]]:  # [half-width, row] in ball px
 		draw_rect(Rect2(CENTER_X - r[0] * BALL_SCALE, FLOOR_Y + (r[1] - 0.5) * BALL_SCALE,
 			r[0] * 2.0 * BALL_SCALE, BALL_SCALE), Color(0, 0, 0, 0.16))
 	# The ball: one cell of the sheet, bottom-anchored to the floor line,

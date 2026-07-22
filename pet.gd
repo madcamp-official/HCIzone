@@ -4,7 +4,7 @@ extends Node2D
 ##    Dock; walks along their edges, rides windows that move, and falls (with
 ##    a squish landing) when its perch disappears.
 ##  - Drag with the left mouse button to carry it (drop it onto a window!).
-##  - Right-click to feed it a cookie.
+##  - Right-click to feed it an apple.
 ##  - Click (without dragging) to boop it — this also wakes it from a nap.
 ##  - Middle-click or press P to toggle play mode: it chases your cursor,
 ##    jumping after it, until it gets tired.
@@ -34,14 +34,19 @@ enum Form { EEVEE, SNORLAX, FLETCHLING }
 # NOTE: Fletchling's FlapAround sheet spins the bird through all 8 directions
 # within one loop, so playing it whole looks like tumbling; frames 0-1 of the
 # facing row are a clean directional flap, and that pair is its flight.
+# `mouth` = where the snack is held during the eat animation, in that anim's
+# own sprite pixels: x = forward of body center (toward the facing side),
+# y = height above the feet line. Each character's eat pose puts its mouth in
+# a different spot (Eevee front-on, Snorlax's face upper-right, Fletchling's
+# beak out front), so the food is anchored per-form.
 const FORM_DEFS: Array[Dictionary] = [
-	{ name = "Eevee", bird = false, anims = {
+	{ name = "Eevee", bird = false, mouth = Vector2(6, 11), anims = {
 		idle = "Idle", walk = "Walk", sleep = "Sleep", eat = "Eat",
 		air = "Hurt", crouch = "Hop", drag = "Float", fly = "" } },
-	{ name = "Snorlax", bird = false, anims = {
+	{ name = "Snorlax", bird = false, mouth = Vector2(7, 24), anims = {
 		idle = "Idle", walk = "Walk", sleep = "Sleep", eat = "Swing",
 		air = "Hurt", crouch = "Hop", drag = "Hurt", fly = "" } },
-	{ name = "Fletchling", bird = true, anims = {
+	{ name = "Fletchling", bird = true, mouth = Vector2(9, 11), anims = {
 		idle = "Idle", walk = "Walk", sleep = "Sleep", eat = "Attack",
 		air = "Hurt", crouch = "Hop", drag = "FlapAround:0-1:5", fly = "FlapAround:0-1:5" } },
 ]
@@ -91,7 +96,7 @@ var facing := 1              # 1 = facing right, -1 = facing left
 var hunger := 0.0
 var nap_in := 0.0            # wall-clock until the next nap
 
-var eat_progress := 0.0      # 0..1 while a cookie is being eaten
+var eat_progress := 0.0      # 0..1 while a snack is being eaten
 
 var wander_dir := 1
 
@@ -112,7 +117,7 @@ var fly_bob_time := 0.0
 # half_w (content half-width from frame center)} }
 var _sprites := {}
 # _metrics[form] = idle-pose content size {half_w, height} in sprite pixels —
-# used to place the shadow, particles, and cookie around any character.
+# used to place the shadow, particles, and snack around any character.
 var _metrics := {}
 var _anim_name := ""
 var _anim_clock := 0.0
@@ -170,13 +175,18 @@ var _icons_supported := OS.get_name() == "macOS" \
 var _helper_path := ""
 var _icons_script_path := ""
 
-# Floating decorations: hearts when booped, a pixel Zzz while napping,
-# musical notes in play mode, and a cookie thought-bubble when hungry.
+# Floating decorations, all move_VFX overlay animations: a heart burst when
+# booped/fed, a pixel Zzz while napping, musical notes in play mode, and a
+# spiky mark when hungry.
 var particles: Array[Dictionary] = []
 # move_VFX overlay animations (see _load_vfx): kind -> {frames, ft}.
 # Particles whose kind is in here play the frames in place instead of the
 # procedural drift-and-fade behavior.
 var _vfx := {}
+# The snack the pet eats, cropped from sprites/items.png (see _load_snack):
+# [0] = apple, [1] = golden apple. eat_gold picks which one per feeding.
+var _snack: Array = []
+var eat_gold := false
 
 @onready var win: Window = get_window()
 
@@ -217,6 +227,7 @@ func _ready() -> void:
 	texture_filter = TEXTURE_FILTER_NEAREST  # crisp pixel art when scaled
 	_load_form_sprites(form)
 	_load_vfx()
+	_load_snack()
 	_init_bridge()
 	_create_home()
 	# _rebuild_platforms() normally only runs in _process(), so without this
@@ -791,6 +802,8 @@ func _process(delta: float) -> void:
 				state = State.GO_HOME
 			elif play_mode:
 				state = State.PLAY
+			elif _on_cramped_perch() and randf() < delta * 1.5 and _try_hop():
+				pass  # too small to stand on (the ball crown) — hop off promptly
 			elif nap_in <= 0.0:
 				_start_nap()
 			elif randf() < delta * 0.15 and _try_hop():
@@ -800,7 +813,8 @@ func _process(delta: float) -> void:
 			elif randf() < delta * 0.006:
 				_head_home()  # every few minutes it goes home on its own
 			elif hunger > HUNGRY_AFTER and randf() < delta * 0.35:
-				_spawn(&"thought", _above_head(facing * (_m().half_w * SPRITE_SCALE + 70.0)))
+				# Lowered toward the head so the mark reads as coming off the pet.
+				_spawn(&"hungry", _above_head() + Vector2(0, 95))
 		State.WANDER:
 			_wander(delta)
 		State.EAT:
@@ -809,7 +823,7 @@ func _process(delta: float) -> void:
 				eat_progress += delta / 1.6
 				if eat_progress >= 1.0:
 					hunger = 0.0
-					_spawn(&"heart", _above_head())
+					_spawn(&"heart", _above_head() + Vector2(0, 95))
 					state = _grounded_state()
 		State.NAP:
 			if _stick_to_ground():
@@ -1092,6 +1106,16 @@ func _wander(delta: float) -> void:
 		state = State.IDLE
 
 
+## True when the current ledge is too narrow to actually pace on — the ball's
+## crown. Such a perch can't be walked off, so the pet must hop off it, and
+## shouldn't loiter (or nap) there in the meantime.
+func _on_cramped_perch() -> bool:
+	var p := _current_platform()
+	if p.is_empty():
+		return false
+	return (p.x2 - FOOT_HALF) - (p.x1 + FOOT_HALF) < FOOT_HALF
+
+
 ## Picks a reachable ledge and starts a hop (or, for a parrot, a flight)
 ## toward it. Returns false if nothing is in range.
 func _try_hop() -> bool:
@@ -1103,6 +1127,14 @@ func _try_hop() -> bool:
 		return true
 	var fx := _feet_x()
 	var fy := _feet_y()
+	# A perch too narrow to pace on (the ball's crown) can't be walked off, so
+	# hops must clear it outright — a gentle near-vertical hop just drops back
+	# onto it, which is why a pet could get marooned up there. Detect that and
+	# take a wider, more decisive leap.
+	var cur := _current_platform()
+	var cramped: bool = not cur.is_empty() \
+		and (cur.x2 - FOOT_HALF) - (cur.x1 + FOOT_HALF) < FOOT_HALF
+	var spread := 280.0 if cramped else 90.0
 	var picks: Array = []
 	for p in platforms:
 		if p.id == ground_id:
@@ -1114,19 +1146,31 @@ func _try_hop() -> bool:
 		var dy: float = p.y - fy  # negative = ledge is above us
 		if dy < -HOP_MAX_UP or dy > HOP_MAX_DROP:
 			continue
-		var tx := clampf(fx + randf_range(-90.0, 90.0), lo, hi)
-		if absf(tx - fx) > HOP_MAX_DX:
-			continue
-		# Solve the jump arc: apex comfortably above both ledges, then the
-		# horizontal speed that arrives at tx exactly when we come down to p.y.
-		var apex: float = minf(fy, p.y) - randf_range(200.0, 320.0)
-		var vy0 := -sqrt(2.0 * GRAVITY * (fy - apex))
-		var t_up := -vy0 / GRAVITY
-		var t_down := sqrt(2.0 * maxf(p.y - apex, 1.0) / GRAVITY)
-		var vx := (tx - fx) / (t_up + t_down)
-		if absf(vx) > HOP_MAX_VX:
-			continue  # too far to reach with a believable jump
-		picks.append({ id = p.id, vy0 = vy0, vx = vx })
+		# A few tries per ledge to find an arc that both stays believable and
+		# actually clears whatever we're standing on.
+		for _attempt in 5:
+			var tx := clampf(fx + randf_range(-spread, spread), lo, hi)
+			if absf(tx - fx) > HOP_MAX_DX:
+				continue
+			# Solve the jump arc: apex comfortably above both ledges, then the
+			# horizontal speed that arrives at tx exactly when we come down to p.y.
+			var apex: float = minf(fy, p.y) - randf_range(200.0, 320.0)
+			var vy0 := -sqrt(2.0 * GRAVITY * (fy - apex))
+			var t_up := -vy0 / GRAVITY
+			var t_down := sqrt(2.0 * maxf(p.y - apex, 1.0) / GRAVITY)
+			var vx := (tx - fx) / (t_up + t_down)
+			if absf(vx) > HOP_MAX_VX:
+				continue  # too far to reach with a believable jump
+			# Reject hops that would fall back onto the current ledge: for a
+			# target at or below us, we re-cross our own height mid-descent at
+			# t = 2*t_up — that x must be past the perch's edge, or we land
+			# right back where we started.
+			if not cur.is_empty() and p.y >= cur.y - 1.0:
+				var x_cross := fx + vx * 2.0 * t_up
+				if x_cross >= cur.x1 - LEDGE_MARGIN and x_cross <= cur.x2 + LEDGE_MARGIN:
+					continue
+			picks.append({ id = p.id, vy0 = vy0, vx = vx })
+			break
 	if picks.is_empty():
 		return false
 	# Prefer perching on windows and icons over the plain Dock line.
@@ -1255,11 +1299,12 @@ func _feed() -> void:
 	if state == State.PLAY and ground_id == -2:
 		return  # can't eat mid-jump
 	eat_progress = 0.0
+	eat_gold = randf() < 0.25  # a golden apple is the rarer treat
 	state = State.EAT
 
 
 func _boop() -> void:
-	_spawn(&"heart", _above_head(randf_range(-40.0, 40.0)))
+	_spawn(&"heart", _above_head(randf_range(-40.0, 40.0)) + Vector2(0, 95))
 
 
 func _start_wander() -> void:
@@ -1300,7 +1345,7 @@ func _update_particles(delta: float) -> void:
 
 
 # ----------------------------------------------------------------------------
-# Drawing — the characters come from PMD sprite sheets; the shadow, cookie,
+# Drawing — the characters come from PMD sprite sheets; the shadow, snack,
 # and floating particles are still drawn procedurally.
 # ----------------------------------------------------------------------------
 
@@ -1321,67 +1366,73 @@ func _draw() -> void:
 
 	_draw_sprite()
 
-	# Cookie being eaten (held in front of the snout/beak)
-	if state == State.EAT:
-		var cookie_scale := 1.0 - eat_progress
-		if cookie_scale > 0.05:
-			var mtr := _m()
-			var cookie_pos := Vector2(
-				CENTER.x + facing * (mtr.half_w * SPRITE_SCALE + 30.0),
-				FOOT_Y - mtr.height * SPRITE_SCALE * 0.45)
-			draw_set_transform(cookie_pos, 0.0, Vector2(cookie_scale, cookie_scale))
-			draw_circle(Vector2.ZERO, 28.0, Color("c98a4b"))
-			for chip in [Vector2(-10, -8), Vector2(10, -3), Vector2(-3, 12)]:
-				draw_circle(chip, 5.0, Color("6b4226"))
+	# The snack being eaten — an apple (or, rarely, a golden apple) from
+	# items.png, held in front of the snout/beak and shrinking as it's eaten.
+	if state == State.EAT and not _snack.is_empty():
+		var snack_scale := 1.0 - eat_progress
+		if snack_scale > 0.05:
+			var mouth: Vector2 = FORM_DEFS[form].mouth
+			var snack_pos := Vector2(
+				CENTER.x + facing * mouth.x * SPRITE_SCALE,
+				FOOT_Y - mouth.y * SPRITE_SCALE)
+			var tex: Texture2D = _snack[1 if eat_gold else 0]
+			var tw: float = tex.get_width()
+			var th: float = tex.get_height()
+			draw_set_transform(snack_pos, 0.0, Vector2(snack_scale, snack_scale) * 3.4)
+			draw_texture_rect(tex, Rect2(-tw * 0.5, -th * 0.5, tw, th), false)
+			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
-	# Floating particles
+	# Floating particles — all are move_VFX overlay animations now
+	# (heart / notes / zzz / hungry).
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 	for p in particles:
-		var alpha: float = clampf(1.0 - p.age / 2.2, 0.0, 1.0)
-		match p.kind:
-			&"heart":
-				_draw_heart(p.pos, 2.5 + p.age * 0.5, Color(1.0, 0.42, 0.5, alpha))
-			&"notes", &"zzz":
-				_draw_vfx(p)
-			&"thought":
-				draw_circle(p.pos, 34.0, Color(1, 1, 1, alpha * 0.85))
-				draw_circle(p.pos + Vector2(-30, 30), 10.0, Color(1, 1, 1, alpha * 0.7))
-				draw_circle(p.pos, 16.0, Color("c98a4b", alpha))
+		_draw_vfx(p)
 
 
 ## The character's PMD pixel shadow for the current frame — the sheet's
 ## `<Anim>-Shadow.png` marker recolored black at load — drawn translucent
-## under the sprite exactly where the sheet places it (ellipse centered on
-## the feet line), clipped to [lo, hi] (the ledge's extent in window-local
-## x). Falls back to the smooth ellipse for sheets without a shadow file.
+## under the sprite in its natural spot but clipped at the feet line so only
+## the upper half of the ellipse shows (the lower half would slip behind the
+## Dock/ledge top), and clipped to [lo, hi] (the ledge's extent in
+## window-local x) on whole-pixel boundaries so a shadow at a window edge is
+## cut with a chunky pixel edge rather than floating past it. Falls back to
+## the smooth ellipse for sheets without a shadow file.
 func _draw_pet_shadow(lo: float, hi: float) -> void:
 	var fi := _frame_info()
 	if fi.is_empty() or fi.sp.shadow == null:
 		_draw_shadow(lo, hi, _m().half_w * SPRITE_SCALE * 1.15)
 		return
 	var sp: Dictionary = fi.sp
-	# A ledge narrower than the shadow itself (the ball's crown, mostly)
-	# shrinks the whole shadow to fit instead of chopping its sides off;
-	# clipping is kept for the ordinary near-an-edge overhang case.
+	var fw: int = sp.fw
+	# A ledge narrower than the shadow itself (the ball's crown) shrinks the
+	# whole shadow to fit.
 	var k := 1.0
 	var sw: float = sp.shalf * 2.0 * SPRITE_SCALE
 	if hi - lo < sw:
 		k = maxf((hi - lo) / sw, 0.3)
 	var sx: float = (1.0 + fi.squash) * (-1.0 if fi.flip else 1.0) * k
 	var sy: float = (1.0 - fi.squash) * k
-	# The ledge interval mapped into the sprite's local (scaled/flipped) space.
+	# Clip to the ledge so the shadow never floats past its edge, but snap the
+	# cut to whole shadow pixels (each is SPRITE_SCALE wide) — the clipped edge
+	# then falls on a chunky pixel boundary instead of a razor-thin sub-pixel
+	# slice, so it reads as part of the pixel art. lo/hi map to source columns
+	# via col = local_x / SPRITE_SCALE + fw/2.
 	var a: float = (lo - CENTER.x) / sx
 	var b: float = (hi - CENTER.x) / sx
-	var w: float = sp.fw * SPRITE_SCALE
-	var x0: float = maxf(-w * 0.5, minf(a, b))
-	var x1: float = minf(w * 0.5, maxf(a, b))
-	if x1 <= x0:
+	var col_l := clampi(int(ceil(minf(a, b) / SPRITE_SCALE + fw * 0.5)), 0, fw)
+	var col_r := clampi(int(floor(maxf(a, b) / SPRITE_SCALE + fw * 0.5)), 0, fw)
+	if col_r <= col_l:
 		return
-	var src_x: float = (int(sp.col0) + fi.idx) * sp.fw + x0 / SPRITE_SCALE + sp.fw * 0.5
+	var x0 := (col_l - fw * 0.5) * SPRITE_SCALE
+	# Draw only down to the feet line (local y = 0), clipping off the ellipse's
+	# lower half: that part hangs below the ledge/Dock top, where it either gets
+	# occluded (reads as a shadow "behind" the window) or floats detached if we
+	# raise the whole thing. Keeping the upper half in place preserves the flat,
+	# grounded 2D look — the shadow tucks under the feet like a classic sprite.
 	draw_set_transform(Vector2(CENTER.x, FOOT_Y), 0.0, Vector2(sx, sy))
 	draw_texture_rect_region(sp.shadow,
-		Rect2(x0, -sp.foot * SPRITE_SCALE, x1 - x0, sp.fh * SPRITE_SCALE),
-		Rect2(src_x, fi.row * sp.fh, (x1 - x0) / SPRITE_SCALE, sp.fh),
+		Rect2(x0, -sp.foot * SPRITE_SCALE, (col_r - col_l) * SPRITE_SCALE, sp.foot * SPRITE_SCALE),
+		Rect2((int(sp.col0) + fi.idx) * fw + col_l, fi.row * sp.fh, col_r - col_l, sp.foot),
 		Color(1, 1, 1, 0.20))
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
@@ -1563,7 +1614,7 @@ func _load_form_sprites(fi: int) -> void:
 			shadow = shadow_tex, shalf = shalf,
 		}
 	_sprites[fi] = sheets
-	# Idle-pose metrics for shadow/particle/cookie placement.
+	# Idle-pose metrics for shadow/particle/snack placement.
 	if sheets.has(def.anims.idle):
 		var idle: Dictionary = sheets[def.anims.idle]
 		_metrics[fi] = {
@@ -1591,10 +1642,11 @@ func _draw_vfx(p: Dictionary) -> void:
 
 
 ## Loads the move_VFX overlay animations played by _draw_vfx, straight from
-## disk like the character sheets: musical notes for play mode (0007/001,
-## one PNG per frame) and the wobbling Zzz bubble for naps (0078/<frame>/,
-## one PNG inside each numbered folder). Frame canvases vary per frame, so
-## they are drawn bottom-center anchored.
+## disk like the character sheets: musical notes for play mode (0007/001),
+## the heart burst for boops/feeding (0051/000), the hungry mark (0121/004) —
+## each a single folder of numbered PNG frames — and the wobbling Zzz bubble
+## for naps (0078/<frame>/, one PNG inside each numbered folder). Frame
+## canvases vary per frame, so they are drawn bottom-center anchored.
 func _load_vfx() -> void:
 	var notes: Array = []
 	var dir := ProjectSettings.globalize_path("res://sprites/move_VFX/0007/001")
@@ -1623,13 +1675,49 @@ func _load_vfx() -> void:
 		push_warning("sprites/move_VFX/0078 not found — nap Zzz VFX disabled.")
 	else:
 		_vfx[&"zzz"] = { frames = zzz, ft = 0.16, sc = VFX_SCALE }
+	# Heart burst (boop / fed) and the hungry mark, each a single folder of
+	# numbered PNG frames like 0007/001.
+	var hearts := _load_vfx_folder("res://sprites/move_VFX/0051/000")
+	if hearts.is_empty():
+		push_warning("sprites/move_VFX/0051/000 not found — heart VFX disabled.")
+	else:
+		_vfx[&"heart"] = { frames = hearts, ft = 0.05, sc = VFX_SCALE }
+	var hungry := _load_vfx_folder("res://sprites/move_VFX/0121/004")
+	if hungry.is_empty():
+		push_warning("sprites/move_VFX/0121/004 not found — hungry VFX disabled.")
+	else:
+		_vfx[&"hungry"] = { frames = hungry, ft = 0.08, sc = VFX_SCALE }
 
 
-func _draw_heart(pos: Vector2, s: float, color: Color) -> void:
-	draw_set_transform(pos, 0.0, Vector2(s, s))
-	draw_circle(Vector2(-3.2, -2.0), 4.0, color)
-	draw_circle(Vector2(3.2, -2.0), 4.0, color)
-	draw_colored_polygon(PackedVector2Array([
-		Vector2(-6.8, 0.0), Vector2(6.8, 0.0), Vector2(0.0, 8.5)
-	]), color)
-	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+## Loads a single move_VFX folder (numbered PNG frames) into an array of
+## textures, in frame order. Missing indices in the folder are simply skipped.
+func _load_vfx_folder(rel: String) -> Array:
+	var frames: Array = []
+	var dir := ProjectSettings.globalize_path(rel)
+	var files: Array = Array(DirAccess.get_files_at(dir))
+	files = files.filter(func(f): return str(f).ends_with(".png"))
+	files.sort()
+	for f in files:
+		var img := Image.load_from_file(dir.path_join(f))
+		if img != null:
+			frames.append(ImageTexture.create_from_image(img))
+	return frames
+
+
+## Crops the apple (100,61) and golden apple (116,61), each 13x15, out of the
+## Food row of sprites/items.png — the pet's snack. The sheet has an opaque
+## teal background, so it's keyed out to transparent per crop.
+func _load_snack() -> void:
+	var sheet := Image.load_from_file(ProjectSettings.globalize_path("res://sprites/items.png"))
+	if sheet == null:
+		push_warning("sprites/items.png not found — the pet will eat nothing visible.")
+		return
+	sheet.convert(Image.FORMAT_RGBA8)
+	for r in [Rect2i(100, 61, 13, 15), Rect2i(116, 61, 13, 15)]:
+		var sub := sheet.get_region(r)
+		for y in sub.get_height():
+			for x in sub.get_width():
+				var c := sub.get_pixel(x, y)
+				if absf(c.r) < 0.03 and absf(c.g - 0.5) < 0.03 and absf(c.b - 0.5) < 0.03:
+					sub.set_pixel(x, y, Color(0, 0, 0, 0))
+		_snack.append(ImageTexture.create_from_image(sub))
