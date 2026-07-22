@@ -48,7 +48,6 @@ const uint8_t PIN_CLIFF = A0;
 // ─────────────────────────────────────────────────────────────────────────
 // 센서 극성 — 하드웨어에 맞춰 뒤집을 수 있게 상수화
 const uint8_t CLIFF_SURFACE_STATE = LOW;  // 바닥이 있을 때 KY-032 출력. 낭떠러지 = 반대값.
-const uint8_t IR_ACTIVE_STATE     = LOW;  // 비콘 버스트 수신 시 KY-022 출력.
 
 // 모터 속도 (0~255 PWM)
 const uint8_t SPEED_CRUISE = 150;  // 주행
@@ -71,12 +70,18 @@ const uint16_t OBSTACLE_CM     = 15;    // 이 거리 이하면 장애물로 판
 const uint16_t ULTRA_PERIOD_MS = 60;    // 초음파 측정 주기
 const uint32_t ECHO_TIMEOUT_US = 8000;  // ~1.3m. pulseIn 블로킹 상한을 짧게.
 
-// IR 방향 측정창 (README: 측정창 140ms)
-const uint16_t IR_WINDOW_MS = 140;
-const uint8_t  IR_MARGIN    = 2;    // 좌우 카운트 차가 이 값 넘어야 방향 확정
-// 리드 스위치가 빠졌으므로 도킹은 IR 세기로 근사. 두 수신 합이 이 값 이상이면
-// "집에 충분히 가까움"으로 보고 정지. 실측으로 반드시 튜닝할 것.
-const uint16_t IR_ARRIVE_COUNT = 40;
+// 비콘 감지 (04_beacon_test 방식): 정지 상태에서 넓은 창으로 LOW 샘플 수를 세어
+// 좌/우 세기를 비교한다. main_robot 은 이 측정을 ST_HOME 에서만, 정지 상태로 수행.
+const int      IR_SAMPLES    = 2800;  // 약 140ms (50us x 2800) — 비콘 주기(70ms)의 2배
+const int      IR_NO_SIGNAL  = 25;    // 좌·우 각각 이 미만이면 신호 없음
+const int      IR_CENTER_TOL = 30;    // 좌우 차가 이보다 작으면 정면
+// 리드 스위치가 없으므로 도킹은 IR 세기로 근사. 양쪽이 이 값 이상이면 도착. (실측 튜닝)
+const int      IR_ARRIVE_STRENGTH = 500;
+
+// 귀가 이동 한 스텝 길이 (ms). 측정→이동을 번갈아 하며 접근.
+const uint16_t HOME_FORWARD_MS = 300;  // 정면일 때 전진
+const uint16_t HOME_TURN_MS    = 150;  // 방향 보정 회전
+const uint16_t HOME_SEARCH_MS  = 200;  // 신호 없을 때 탐색 회전
 
 // ─────────────────────────────────────────────────────────────────────────
 //  전역 상태
@@ -96,11 +101,18 @@ bool     turnRight = true;      // 회전 방향
 uint32_t lastUltra = 0;
 uint16_t lastDistCm = 999;
 
-// IR 방향 카운팅
-uint32_t irWindowStart = 0;
-uint16_t irCntL = 0, irCntR = 0;      // 현재 창 누적
-uint16_t irLatchL = 0, irLatchR = 0;  // 직전 창 확정값
-uint8_t  irPrevL = HIGH, irPrevR = HIGH;
+// 귀가(ST_HOME) 진행용
+uint8_t  homePhase = 0;        // 0 = 측정(정지), 1 = 이동(비차단)
+uint32_t homeMoveStart = 0;    // 이동 시작 시각
+uint16_t homeMoveDur = 0;      // 이번 이동 길이
+int      homeLeft = 0, homeRight = 0;  // 마지막 측정 세기(상태 출력용)
+
+// ─────────────────────────────────────────────────────────────────────────
+//  로그 출력 — USB(Serial)와 블루투스(bt)로 "동시에" 내보낸다.
+//  덕분에 USB 빼고 배터리로 돌려도 컴퓨터가 블루투스로 메시지를 받는다.
+// ─────────────────────────────────────────────────────────────────────────
+template <typename T> void logPrint(T v)   { Serial.print(v);   bt.print(v); }
+template <typename T> void logPrintln(T v) { Serial.println(v); bt.println(v); }
 
 // ─────────────────────────────────────────────────────────────────────────
 //  모터 제어 (스키드 스티어). speed: -255~255 (음수 = 후진)
@@ -148,18 +160,15 @@ void updateUltrasonic() {
 
 bool obstacleAhead() { return lastDistCm <= OBSTACLE_CM; }
 
-// IR 비콘: 매 루프 두 수신기의 falling edge 를 세고, IR_WINDOW 마다 확정.
-void updateIrDirection() {
-  uint8_t l = digitalRead(PIN_IR_L);
-  uint8_t r = digitalRead(PIN_IR_R);
-  if (irPrevL != IR_ACTIVE_STATE && l == IR_ACTIVE_STATE) irCntL++;
-  if (irPrevR != IR_ACTIVE_STATE && r == IR_ACTIVE_STATE) irCntR++;
-  irPrevL = l; irPrevR = r;
-  if (millis() - irWindowStart >= IR_WINDOW_MS) {
-    irLatchL = irCntL; irLatchR = irCntR;
-    irCntL = irCntR = 0;
-    irWindowStart = millis();
+// IR 비콘 세기 측정 (04_beacon_test 와 동일). 넓은 창에서 LOW 샘플 수를 센다.
+// ~140ms 블로킹이므로 반드시 "정지 상태"에서만 호출한다(ST_HOME 측정 단계).
+int signalStrength(uint8_t pin) {
+  int lowCount = 0;
+  for (int i = 0; i < IR_SAMPLES; i++) {
+    if (digitalRead(pin) == LOW) lowCount++;
+    delayMicroseconds(50);
   }
+  return lowCount;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -196,16 +205,16 @@ void beginRecovery(State back, bool goRight) {
 // ─────────────────────────────────────────────────────────────────────────
 void handleCommand(char c) {
   switch (c) {
-    case 'F': case 'f': state = ST_DRIVE;  Serial.println(F("CMD: DRIVE")); break;
-    case 'S': case 's': state = ST_IDLE; stopMotors(); Serial.println(F("CMD: STOP")); break;
+    case 'F': case 'f': state = ST_DRIVE;  logPrintln(F("CMD: DRIVE")); break;
+    case 'S': case 's': state = ST_IDLE; stopMotors(); logPrintln(F("CMD: STOP")); break;
     case 'H': case 'h':
-      state = ST_HOME; irWindowStart = millis(); irCntL = irCntR = 0;
-      Serial.println(F("CMD: HOME")); break;
-    case 'G': case 'g': state = ST_DRIVE;  Serial.println(F("CMD: GO/DRIVE")); break;
-    case '?': Serial.print(F("STATE=")); Serial.print(state);
-              Serial.print(F(" dist=")); Serial.print(lastDistCm);
-              Serial.print(F(" irL=")); Serial.print(irLatchL);
-              Serial.print(F(" irR=")); Serial.println(irLatchR); break;
+      state = ST_HOME; homePhase = 0;
+      logPrintln(F("CMD: HOME")); break;
+    case 'G': case 'g': state = ST_DRIVE;  logPrintln(F("CMD: GO/DRIVE")); break;
+    case '?': logPrint(F("STATE=")); logPrint(state);
+              logPrint(F(" dist=")); logPrint(lastDistCm);
+              logPrint(F(" irL=")); logPrint(homeLeft);
+              logPrint(F(" irR=")); logPrintln(homeRight); break;
     default: break;
   }
 }
@@ -229,7 +238,7 @@ void setup() {
 
   Serial.begin(9600);
   bt.begin(9600);
-  Serial.println(F("Desk Companion Robot ready. Cmds: F/S/H/G/?"));
+  logPrintln(F("Desk Companion Robot ready. Cmds: F/S/H/G/?"));
 }
 
 void loop() {
@@ -242,7 +251,6 @@ void loop() {
 
   // 2) 센서 갱신 (블로킹 최소화)
   updateUltrasonic();
-  updateIrDirection();
 
   // 3) 명령 처리 (센서 읽기 이후)
   readCommands();
@@ -267,17 +275,31 @@ void loop() {
       break;
 
     case ST_HOME: {
-      // 리드 스위치가 없으므로 IR 세기로 "집 근접" 판정.
-      if (irLatchL + irLatchR >= IR_ARRIVE_COUNT) {
-        stopMotors(); state = ST_ARRIVED; Serial.println(F("ARRIVED")); break;
+      if (homePhase == 0) {
+        // [측정] 정지 상태에서 좌/우 세기 측정 (모터 노이즈 방지 + 낭떠러지 안전)
+        stopMotors();
+        homeLeft  = signalStrength(PIN_IR_L);
+        homeRight = signalStrength(PIN_IR_R);
+        logPrint(F("HOME L=")); logPrint(homeLeft);
+        logPrint(F(" R=")); logPrintln(homeRight);
+
+        if (homeLeft < IR_NO_SIGNAL && homeRight < IR_NO_SIGNAL) {
+          spinRight(SPEED_TURN); homeMoveDur = HOME_SEARCH_MS;             // 신호 없음 → 탐색
+        } else if (homeLeft >= IR_ARRIVE_STRENGTH && homeRight >= IR_ARRIVE_STRENGTH) {
+          stopMotors(); state = ST_ARRIVED; logPrintln(F("ARRIVED")); break;  // 도착
+        } else {
+          int diff = homeLeft - homeRight;
+          if (abs(diff) < IR_CENTER_TOL) { forward(SPEED_HOME); homeMoveDur = HOME_FORWARD_MS; } // 정면 → 직진
+          else if (diff > 0)             { spinLeft(SPEED_TURN);  homeMoveDur = HOME_TURN_MS; }   // 좌 강함 → 좌로
+          else                           { spinRight(SPEED_TURN); homeMoveDur = HOME_TURN_MS; }   // 우 강함 → 우로
+        }
+        homeMoveStart = millis();
+        homePhase = 1;
+      } else {
+        // [이동] 비차단: 낭떠러지·장애물은 루프 상단에서 매 루프 검사됨
+        if (obstacleAhead()) { beginRecovery(ST_HOME, true); state = ST_AVOID; homePhase = 0; break; }
+        if (millis() - homeMoveStart >= homeMoveDur) { stopMotors(); homePhase = 0; }  // 이동 끝 → 재측정
       }
-      if (obstacleAhead()) { beginRecovery(ST_HOME, true); state = ST_AVOID; break; }
-      // IR 세기 비교로 조향
-      int diff = (int)irLatchL - (int)irLatchR;
-      if (diff > IR_MARGIN)       drive(SPEED_HOME / 2, SPEED_HOME);       // 좌가 강함 → 좌로
-      else if (-diff > IR_MARGIN) drive(SPEED_HOME, SPEED_HOME / 2);       // 우가 강함 → 우로
-      else if (irLatchL + irLatchR == 0) spinRight(SPEED_TURN);            // 신호 없음 → 탐색 회전
-      else forward(SPEED_HOME);                                           // 정면 정렬 → 직진
       break;
     }
 
