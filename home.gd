@@ -30,6 +30,10 @@ const BALL_CENTER_UP := BALL_R   # ball center height above the floor line
 var cat_inside := false
 var transfer_mode := ""   # "", "capture" or "release" — set by pet.gd
 var transfer_p := 0.0     # 0..1 through the current transfer
+# Set by pet.gd while the user has summoned the pet back and we're waiting for
+# the robot to dock: the ball rocks continuously (a steady "come on, come on"
+# shiver) instead of the occasional idle wobble.
+var recalling := false
 
 var _tex: ImageTexture
 var _t := 0.0
@@ -49,7 +53,14 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_t += delta
 	if cat_inside and transfer_mode == "":
-		if _wobble > 0.0:
+		if recalling:
+			# Keep the wobble alive back-to-back so the ball never settles —
+			# the same rock, repeated continuously, while we wait for the robot.
+			if _wobble <= 0.0:
+				_wobble = 0.9
+			else:
+				_wobble = maxf(_wobble - delta, 0.0)
+		elif _wobble > 0.0:
 			_wobble = maxf(_wobble - delta, 0.0)
 		else:
 			_wobble_timer -= delta
@@ -59,6 +70,11 @@ func _process(delta: float) -> void:
 	else:
 		_wobble = 0.0
 	queue_redraw()
+
+
+## pet.gd toggles this when the user clicks the ball to summon the pet back.
+func set_recalling(on: bool) -> void:
+	recalling = on
 
 
 ## pet.gd calls this every frame of ENTER_HOME / EXIT_HOME so the ball's
