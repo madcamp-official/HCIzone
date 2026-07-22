@@ -81,7 +81,12 @@ const int      IR_ARRIVE_STRENGTH = 500;
 // 귀가 이동 한 스텝 길이 (ms). 측정→이동을 번갈아 하며 접근.
 const uint16_t HOME_FORWARD_MS = 300;  // 정면일 때 전진
 const uint16_t HOME_TURN_MS    = 150;  // 방향 보정 회전
-const uint16_t HOME_SEARCH_MS  = 200;  // 신호 없을 때 탐색 회전
+const uint16_t HOME_SEARCH_MS  = 200;  // 신호 없을 때 탐색 회전 한 스텝
+
+// 탐색: 제자리 회전 스캔을 이만큼 반복해도 신호가 없으면 새 위치로 이동.
+// (엔코더가 없어 실제 각도는 모름 → "회전 스텝 횟수"로 근사. 실측 튜닝.)
+const uint8_t  SEARCH_MAX       = 12;  // 대략 한 바퀴 분량(SEARCH_MAX x HOME_SEARCH_MS)
+const uint16_t HOME_RELOCATE_MS = 400; // 한 바퀴 훑어도 못 찾으면 전진할 거리
 
 // ─────────────────────────────────────────────────────────────────────────
 //  전역 상태
@@ -106,6 +111,7 @@ uint8_t  homePhase = 0;        // 0 = 측정(정지), 1 = 이동(비차단)
 uint32_t homeMoveStart = 0;    // 이동 시작 시각
 uint16_t homeMoveDur = 0;      // 이번 이동 길이
 int      homeLeft = 0, homeRight = 0;  // 마지막 측정 세기(상태 출력용)
+uint8_t  searchCount = 0;      // 연속 무신호 스캔 횟수(회전 스텝 수)
 
 // ─────────────────────────────────────────────────────────────────────────
 //  로그 출력 — USB(Serial)와 블루투스(bt)로 "동시에" 내보낸다.
@@ -208,7 +214,7 @@ void handleCommand(char c) {
     case 'F': case 'f': state = ST_DRIVE;  logPrintln(F("CMD: DRIVE")); break;
     case 'S': case 's': state = ST_IDLE; stopMotors(); logPrintln(F("CMD: STOP")); break;
     case 'H': case 'h':
-      state = ST_HOME; homePhase = 0;
+      state = ST_HOME; homePhase = 0; searchCount = 0;
       logPrintln(F("CMD: HOME")); break;
     case 'G': case 'g': state = ST_DRIVE;  logPrintln(F("CMD: GO/DRIVE")); break;
     case '?': logPrint(F("STATE=")); logPrint(state);
@@ -284,10 +290,18 @@ void loop() {
         logPrint(F(" R=")); logPrintln(homeRight);
 
         if (homeLeft < IR_NO_SIGNAL && homeRight < IR_NO_SIGNAL) {
-          spinRight(SPEED_TURN); homeMoveDur = HOME_SEARCH_MS;             // 신호 없음 → 탐색
+          // 신호 없음: 제자리 회전으로 스캔. SEARCH_MAX 번 돌아도 못 찾으면 새 위치로 이동.
+          searchCount++;
+          if (searchCount >= SEARCH_MAX) {
+            forward(SPEED_HOME); homeMoveDur = HOME_RELOCATE_MS;           // 한 바퀴 훑어도 없음 → 전진
+            searchCount = 0;
+          } else {
+            spinRight(SPEED_TURN); homeMoveDur = HOME_SEARCH_MS;           // 제자리 회전 스캔
+          }
         } else if (homeLeft >= IR_ARRIVE_STRENGTH && homeRight >= IR_ARRIVE_STRENGTH) {
           stopMotors(); state = ST_ARRIVED; logPrintln(F("ARRIVED")); break;  // 도착
         } else {
+          searchCount = 0;   // 신호 잡음 → 탐색 카운터 리셋
           int diff = homeLeft - homeRight;
           if (abs(diff) < IR_CENTER_TOL) { forward(SPEED_HOME); homeMoveDur = HOME_FORWARD_MS; } // 정면 → 직진
           else if (diff > 0)             { spinLeft(SPEED_TURN);  homeMoveDur = HOME_TURN_MS; }   // 좌 강함 → 좌로
