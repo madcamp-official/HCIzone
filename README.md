@@ -114,14 +114,20 @@ robot-bridge process needs lives in `~/.desktop-pet/` (override with the
 
 | File | Direction | Meaning |
 |---|---|---|
-| `state` | pet → robot | Current holder of the soul: `virtual` or `home` (= robot's turn) |
+| `state` | pet → robot | Holder of the soul: `virtual` (on screen), `home` (in the robot, roaming), or `recall` (user summoned it back — the robot should dock) |
 | `command` | robot → pet | Write one of `enter_home`, `exit_home`, `feed`, `play`; the pet reads and deletes it within ~0.3 s |
 | `on_enter_home` | pet → robot | Executable hook, run (non-blocking) the moment the cat finishes entering — wake the robot here |
 | `on_exit_home` | pet → robot | Executable hook, run when the cat is let back out — put the robot to sleep here |
 
 So the robot loop is: watch for `on_enter_home` (or poll `state`), animate the
 physical pet, and when the robot should hand back, write `exit_home` into
-`command`.
+`command`. **Summoning:** clicking the ball while the pet is inside flips
+`state` to `recall` and the ball wobbles continuously; the robot should return
+to its dock and, once there, write `exit_home` so the pet pops back out. (The
+pet does *not* leave the ball on its own from a click — pressing `H` is the
+no-robot escape hatch that force-releases it.) [bridge.py](bridge.py) already
+implements this whole loop over Bluetooth serial to `firmware/main_robot`
+(`home`→`F`, `recall`→`H`, `virtual`→`S`; `ARRIVED`/`STATE=5`→`exit_home`).
 
 ### Worked example: an LED on an Arduino
 

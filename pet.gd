@@ -138,6 +138,11 @@ var _home_press_pos := Vector2i.ZERO
 # executable hooks — the handoff point for a physical pet robot.
 var bridge_dir := ""
 var _pending_cmd := ""       # mutex-protected, set by the poll thread
+# True while the pet is in the ball AND the user has asked for it back: the
+# soul is still in the robot, so instead of popping out immediately we tell the
+# bridge to home the robot (state="recall" → 'H') and wait, wobbling the ball,
+# until the robot docks (ARRIVED → exit_home). Toggled by clicking the ball.
+var _recalling := false
 
 var dragging := false
 var drag_moved := false
@@ -330,9 +335,13 @@ func _on_home_input(event: InputEvent) -> void:
 		else:
 			_home_dragging = false
 			if not _home_drag_moved:
-				# A click on the ball recalls the pet into it, or lets it out.
+				# A click on the ball recalls the pet into it, or — when it's
+				# already inside — summons it back: the soul is in the robot, so
+				# we ask the robot to come home and wait for it to dock rather
+				# than yanking the pet straight out. (Press H to force it out
+				# with no robot; see _input.)
 				if state == State.HOME:
-					_start_exit_home()
+					_toggle_recall()
 				else:
 					_head_home()
 	elif event is InputEventMouseMotion and _home_dragging:
@@ -1034,7 +1043,24 @@ func _head_home() -> void:
 		_begin_flight()  # already airborne — retarget straight to the door
 
 
+## Starts (or cancels) a recall: the pet is in the ball and the user wants it
+## back. We can't just release it — the soul is in the robot — so we flip the
+## bridge state to "recall", which the bridge turns into an 'H' (home) command
+## for the robot. The pet stays in the ball, wobbling, until the robot docks
+## and the bridge writes exit_home. A second click cancels: the robot goes back
+## to free roam ("home" → 'F'). With no bridge/robot running this would trap
+## the pet, so _input's H key still force-releases it immediately.
+func _toggle_recall() -> void:
+	_recalling = not _recalling
+	if home_node:
+		home_node.set_recalling(_recalling)
+	_write_state("recall" if _recalling else "home")
+
+
 func _start_exit_home() -> void:
+	_recalling = false
+	if home_node:
+		home_node.set_recalling(false)
 	visible = true
 	win.mouse_passthrough_polygon = PackedVector2Array()  # clickable again
 	home_node.cat_inside = false
@@ -1239,6 +1265,9 @@ func _input(event: InputEvent) -> void:
 		elif event.keycode == KEY_B:
 			_toggle_form()
 		elif event.keycode == KEY_H:
+			# H force-releases the pet with no robot handshake — the escape
+			# hatch when running without a bridge (a ball click waits for the
+			# robot to dock instead; see _toggle_recall).
 			if state == State.HOME:
 				_start_exit_home()
 			else:

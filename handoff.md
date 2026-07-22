@@ -174,6 +174,21 @@ lives at the repo root. Working branch: **`dev`**.
   `__pycache__/*.pyc` was untracked and `__pycache__/` + `*.pyc` added to
   `.gitignore`.
 
+- **Robot ↔ virtual-pet round-trip is now closed (recall).** Clicking the
+  ball while the pet is inside no longer yanks it straight out — it flips the
+  bridge `state` file to a new `recall` value and the ball wobbles
+  continuously (`home.gd set_recalling`), so the soul stays in the robot until
+  it physically docks. [bridge.py](bridge.py) turns `recall`→`H` (home the
+  robot), keeps re-sending `H` while docking (A-5), and on `ARRIVED`/`STATE=5`
+  writes `exit_home` — which now fires whether the pet state is `home` *or*
+  `recall` (the earlier `=="home"` gate would have trapped a recalled pet).
+  A second ball click cancels (`recall`→`home`→robot `F`). `pet.gd`'s `H` key
+  still force-releases with no robot (escape hatch for running standalone).
+  Verified: a pty fake-robot + scripted pet drives `home→F`, `recall→H`,
+  `ARRIVED→exit_home`, `virtual→S` all green, and the Godot home round-trip
+  (enter_home→HOME→exit_home→virtual) runs error-free. The one thing left to
+  eyeball on real hardware is the physical ball-click + the continuous wobble.
+
 ## What's implemented
 
 - **Platforming physics** (`pet.gd`): gravity, ballistic jumps (cat-style
