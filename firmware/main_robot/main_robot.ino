@@ -108,6 +108,13 @@ uint16_t homeMoveDur = 0;      // 이번 이동 길이
 int      homeLeft = 0, homeRight = 0;  // 마지막 측정 세기(상태 출력용)
 
 // ─────────────────────────────────────────────────────────────────────────
+//  로그 출력 — USB(Serial)와 블루투스(bt)로 "동시에" 내보낸다.
+//  덕분에 USB 빼고 배터리로 돌려도 컴퓨터가 블루투스로 메시지를 받는다.
+// ─────────────────────────────────────────────────────────────────────────
+template <typename T> void logPrint(T v)   { Serial.print(v);   bt.print(v); }
+template <typename T> void logPrintln(T v) { Serial.println(v); bt.println(v); }
+
+// ─────────────────────────────────────────────────────────────────────────
 //  모터 제어 (스키드 스티어). speed: -255~255 (음수 = 후진)
 // ─────────────────────────────────────────────────────────────────────────
 void sideDrive(uint8_t enPin, uint8_t in1, uint8_t in2, int speed, uint16_t trim) {
@@ -198,16 +205,16 @@ void beginRecovery(State back, bool goRight) {
 // ─────────────────────────────────────────────────────────────────────────
 void handleCommand(char c) {
   switch (c) {
-    case 'F': case 'f': state = ST_DRIVE;  Serial.println(F("CMD: DRIVE")); break;
-    case 'S': case 's': state = ST_IDLE; stopMotors(); Serial.println(F("CMD: STOP")); break;
+    case 'F': case 'f': state = ST_DRIVE;  logPrintln(F("CMD: DRIVE")); break;
+    case 'S': case 's': state = ST_IDLE; stopMotors(); logPrintln(F("CMD: STOP")); break;
     case 'H': case 'h':
       state = ST_HOME; homePhase = 0;
-      Serial.println(F("CMD: HOME")); break;
-    case 'G': case 'g': state = ST_DRIVE;  Serial.println(F("CMD: GO/DRIVE")); break;
-    case '?': Serial.print(F("STATE=")); Serial.print(state);
-              Serial.print(F(" dist=")); Serial.print(lastDistCm);
-              Serial.print(F(" irL=")); Serial.print(homeLeft);
-              Serial.print(F(" irR=")); Serial.println(homeRight); break;
+      logPrintln(F("CMD: HOME")); break;
+    case 'G': case 'g': state = ST_DRIVE;  logPrintln(F("CMD: GO/DRIVE")); break;
+    case '?': logPrint(F("STATE=")); logPrint(state);
+              logPrint(F(" dist=")); logPrint(lastDistCm);
+              logPrint(F(" irL=")); logPrint(homeLeft);
+              logPrint(F(" irR=")); logPrintln(homeRight); break;
     default: break;
   }
 }
@@ -231,7 +238,7 @@ void setup() {
 
   Serial.begin(9600);
   bt.begin(9600);
-  Serial.println(F("Desk Companion Robot ready. Cmds: F/S/H/G/?"));
+  logPrintln(F("Desk Companion Robot ready. Cmds: F/S/H/G/?"));
 }
 
 void loop() {
@@ -273,13 +280,13 @@ void loop() {
         stopMotors();
         homeLeft  = signalStrength(PIN_IR_L);
         homeRight = signalStrength(PIN_IR_R);
-        Serial.print(F("HOME L=")); Serial.print(homeLeft);
-        Serial.print(F(" R=")); Serial.println(homeRight);
+        logPrint(F("HOME L=")); logPrint(homeLeft);
+        logPrint(F(" R=")); logPrintln(homeRight);
 
         if (homeLeft < IR_NO_SIGNAL && homeRight < IR_NO_SIGNAL) {
           spinRight(SPEED_TURN); homeMoveDur = HOME_SEARCH_MS;             // 신호 없음 → 탐색
         } else if (homeLeft >= IR_ARRIVE_STRENGTH && homeRight >= IR_ARRIVE_STRENGTH) {
-          stopMotors(); state = ST_ARRIVED; Serial.println(F("ARRIVED")); break;  // 도착
+          stopMotors(); state = ST_ARRIVED; logPrintln(F("ARRIVED")); break;  // 도착
         } else {
           int diff = homeLeft - homeRight;
           if (abs(diff) < IR_CENTER_TOL) { forward(SPEED_HOME); homeMoveDur = HOME_FORWARD_MS; } // 정면 → 직진
