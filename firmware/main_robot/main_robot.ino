@@ -250,18 +250,21 @@ void setup() {
 }
 
 void loop() {
-  // 1) 낭떠러지 = 최우선. 다른 어떤 상태든 즉시 가로챈다.
-  if (cliffDetected() && state != ST_CLIFF) {
+  // 1) 명령 먼저 처리 — 'S'(정지)를 최우선으로 반영한다.
+  //    낭떠러지 검사보다 앞서 실행되어, 정지 명령이 즉시 상태에 반영된다.
+  readCommands();
+
+  // 2) 낭떠러지 안전검사. 단, 사용자가 'S'로 세운 정지 상태(ST_IDLE)는 존중하여
+  //    가로채지 않는다 → S로 멈춘 로봇은 낭떠러지 위에서도 정지를 유지한다.
+  //    (이미 모터가 꺼져 있어 떨어질 위험은 없다. F/G/H를 주면 안전검사가 다시 활성.)
+  if (cliffDetected() && state != ST_CLIFF && state != ST_IDLE) {
     // 센서가 1개라 낭떠러지 방향을 알 수 없음 → 후진 후 기본 방향으로 회전.
     beginRecovery(/*back=*/(state == ST_HOME ? ST_HOME : ST_DRIVE), /*goRight=*/true);
     state = ST_CLIFF;
   }
 
-  // 2) 센서 갱신 (블로킹 최소화)
+  // 3) 센서 갱신 (블로킹 최소화)
   updateUltrasonic();
-
-  // 3) 명령 처리 (센서 읽기 이후)
-  readCommands();
 
   // 4) 상태 실행
   switch (state) {
