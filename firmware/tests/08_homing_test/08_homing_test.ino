@@ -44,11 +44,17 @@ const uint16_t MS_FORWARD_LEG = 300;  // 정면일 때 전진 한 걸음
 const uint16_t MS_TURN_STEP   = 150;  // 방향 보정 한 스텝
 const uint16_t MS_SEARCH_STEP = 200;  // 신호 없을 때 탐색 회전 한 스텝
 
+// 탐색: 제자리 회전 스캔을 이만큼 반복해도 신호 없으면 새 위치로 이동.
+// (엔코더 없음 → "회전 스텝 횟수"로 근사. 실측 튜닝.)
+const uint8_t  SEARCH_MAX  = 12;   // 대략 한 바퀴 분량(SEARCH_MAX x MS_SEARCH_STEP)
+const uint16_t MS_RELOCATE = 400;  // 한 바퀴 훑어도 못 찾으면 전진할 거리
+
 // 좌/우 채널 속도 보정. 100 = 보정 없음.
 const uint16_t TRIM_LEFT  = 100;
 const uint16_t TRIM_RIGHT = 100;
 
 bool arrived = false;
+uint8_t searchCount = 0;   // 연속 무신호 스캔 횟수(회전 스텝 수)
 
 // ─────────────────────────────────────────────────────────────────────────
 //  모터 제어 (스키드 스티어)
@@ -111,11 +117,19 @@ void loop() {
   Serial.print(F("  R=")); Serial.print(right);
   Serial.print(F("  -> "));
 
-  // 2) 신호 없음 → 탐색 회전
+  // 2) 신호 없음 → 제자리 회전 스캔. SEARCH_MAX 번 돌아도 없으면 새 위치로 이동.
   if (left < NO_SIGNAL && right < NO_SIGNAL) {
-    Serial.println(F("NO SIGNAL: search-spin"));
-    turnRightInPlace(SPEED_TURN);
-    delay(MS_SEARCH_STEP);
+    searchCount++;
+    if (searchCount >= SEARCH_MAX) {
+      Serial.println(F("NO SIGNAL: relocate-forward"));
+      forward(SPEED_HOME);
+      delay(MS_RELOCATE);
+      searchCount = 0;
+    } else {
+      Serial.println(F("NO SIGNAL: search-spin"));
+      turnRightInPlace(SPEED_TURN);
+      delay(MS_SEARCH_STEP);
+    }
     stopMotors();
     return;
   }
@@ -129,6 +143,7 @@ void loop() {
   }
 
   // 4) 방향 조향
+  searchCount = 0;   // 신호 잡음 → 탐색 카운터 리셋
   int diff = left - right;
   if (abs(diff) < CENTER_TOL) {
     Serial.println(F("CENTER: forward"));
