@@ -150,6 +150,19 @@ lives at the repo root. Working branch: **`dev`**.
   `pet.gd`, plus the ball-shadow row nudge in `home.gd` and the new
   `sprites/items.png`) are committed and pushed to `dev` on top of `e748721`.
   Nothing is left uncommitted.
+- **`fix/virtual_bot_minor_error_fixing` is merged into `dev`.** It brings a
+  teammate's `desk_pet_robot/desk_pet_robot.ino` (Arduino firmware skeleton)
+  plus pet.gd fixes: a dropped parrot now settles where it was released
+  (`_drop_release`, `DROP_SNAP_UP`) instead of flying off to a random perch;
+  `_fly_step` retargets a moving app window mid-flight; the fall safety net
+  uses the usable rect so it can't land under the Dock; `_rebuild_platforms()`
+  runs once in `_ready()` so the first flight target isn't picked against an
+  empty list; `H`/`enter_home` again cancels a trip already underway (as does
+  play mode); `_go_home_tick` steps off the ball crown when it's above the
+  door; `_feed` ignores mid-hop; and a form whose sheet failed to load gets
+  the all-passthrough polygon instead of swallowing every click.
+  Only conflict was `_ready()` — `_load_snack()` vs the moved
+  `_begin_flight()`; both were kept.
 
 ## What's implemented
 
