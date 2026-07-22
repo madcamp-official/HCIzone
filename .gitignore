@@ -9,3 +9,7 @@ helpers/window_list
 helpers/window_list.exe
 
 .DS_Store
+
+# Python bytecode cache (bridge.py)
+__pycache__/
+*.pyc
