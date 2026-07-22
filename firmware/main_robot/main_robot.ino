@@ -96,7 +96,7 @@ const uint16_t HOME_RELOCATE_MS = 400; // 한 바퀴 훑어도 못 찾으면 전
 SoftwareSerial bt(PIN_BT_RX, PIN_BT_TX);
 
 enum State { ST_IDLE, ST_DRIVE, ST_AVOID, ST_CLIFF, ST_HOME, ST_ARRIVED };
-State state = ST_IDLE;.
+State state = ST_IDLE;
 State resumeState = ST_DRIVE;   // AVOID/CLIFF 종료 후 복귀할 상태
 
 // 회피/낭떠러지 시퀀스 진행용
