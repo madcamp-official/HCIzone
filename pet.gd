@@ -74,6 +74,7 @@ const HOP_CROUCH := 0.18     # wind-up squat before launching
 const FLY_SPEED := 420.0     # bird flight speed between ledges
 const FLY_MAX_RANGE := 1500.0
 const FLY_ARRIVE_DIST := 16.0
+const DROP_SNAP_UP := 120.0  # dropped parrot may snap up to a ledge this far above its feet
 const HUNGRY_AFTER := 45.0   # seconds until the cat looks hungry
 const NAP_MIN := 25.0        # seconds of wakefulness before a nap can start
 const NAP_MAX := 60.0
@@ -227,10 +228,16 @@ func _ready() -> void:
 	_load_form_sprites(form)
 	_load_vfx()
 	_load_snack()
-	if _is_bird():
-		_begin_flight()  # give the initial fall a real flight target
 	_init_bridge()
 	_create_home()
+	# _rebuild_platforms() normally only runs in _process(), so without this
+	# call the very first flight target would be chosen against an empty
+	# platforms list (no Dock line, no home crown — let alone any real
+	# windows, which the poll thread hasn't reported yet either) and always
+	# fall back to diving straight down.
+	_rebuild_platforms()
+	if _is_bird():
+		_begin_flight()  # give the initial fall a real flight target
 	if FileAccess.file_exists(_helper_path):
 		_thread = Thread.new()
 		_thread.start(_poll_windows.bind(OS.get_process_id()))
@@ -565,7 +572,12 @@ func _update_passthrough() -> void:
 		return  # entering HOME already set the tiny all-passthrough triangle
 	var sheets: Dictionary = _sprites.get(form, {})
 	if not sheets.has(_anim_name):
-		win.mouse_passthrough_polygon = PackedVector2Array()
+		# Sheet failed to load — the pet draws nothing (see _draw_sprite), so
+		# don't let the big invisible window swallow every click either; a
+		# truly empty polygon disables passthrough entirely (opposite of what
+		# we want here), so use the same all-passthrough sentinel as HOME.
+		win.mouse_passthrough_polygon = PackedVector2Array([
+			Vector2(0, 0), Vector2(1, 0), Vector2(0, 1)])
 		return
 	var sp: Dictionary = sheets[_anim_name]
 	var margin := 16.0
@@ -654,10 +666,57 @@ func _begin_flight() -> void:
 		_fly_to(options.pick_random())
 
 
+## Lands the pet after a drag release. The cat just falls, so it settles on the
+## ledge below the drop point. The parrot must NOT _begin_flight here — that
+## picks a random perch and the drop position would be ignored entirely.
+## Instead it glides down onto the same ledge gravity would find (with a small
+## upward snap, so releasing it slightly onto a window still perches on it).
+func _drop_release() -> void:
+	if not _is_bird():
+		_start_fall()
+		return
+	land_squish = 0.0
+	var fx := _feet_x()
+	var fy := _feet_y()
+	var best := {}
+	for p in platforms:
+		if fx < p.x1 - LEDGE_MARGIN or fx > p.x2 + LEDGE_MARGIN:
+			continue
+		if p.y < fy - DROP_SNAP_UP:
+			continue  # too far above to snap up onto
+		if best.is_empty() or p.y < best.y:
+			best = p
+	if best.is_empty():
+		_start_fall()  # released past the screen edge — fly off to some perch
+		return
+	var lo: float = best.x1 + FOOT_HALF
+	var hi: float = best.x2 - FOOT_HALF
+	fly_target = Vector2(clampf(fx, lo, hi) if lo <= hi else (best.x1 + best.x2) * 0.5, best.y)
+	fly_target_ground = best.id
+	ground_id = -2
+	vy = 0.0
+	state = State.FALL
+
+
 ## One frame of level flight toward fly_target, with a gentle bob. Returns
 ## true once it has landed on fly_target_ground.
 func _fly_step(delta: float) -> bool:
 	fly_bob_time += delta
+	# Track a real app window's current position while flying toward it, so
+	# dragging the window mid-flight doesn't leave the bird arriving at a
+	# stale, now-empty point (it would self-correct into a fall a frame
+	# later, but reads as a visible teleport-then-drop glitch). The Dock
+	# line, home crown, and desktop icons don't need this: they're either
+	# effectively stationary or, for the home door, already retargeted at
+	# takeoff by _begin_flight()'s own going_home branch.
+	if fly_target_ground > 0:
+		for p in platforms:
+			if p.id == fly_target_ground:
+				var lo: float = p.x1 + FOOT_HALF
+				var hi: float = p.x2 - FOOT_HALF
+				fly_target.x = clampf(fly_target.x, lo, hi) if lo <= hi else (p.x1 + p.x2) * 0.5
+				fly_target.y = p.y
+				break
 	var feet := Vector2(_feet_x(), _feet_y())
 	var to_target := fly_target - feet
 	if to_target.length() <= FLY_ARRIVE_DIST:
@@ -694,12 +753,16 @@ func _airborne_step(delta: float, steer: float) -> bool:
 				if best.is_empty() or p.y < best.y:
 					best = p
 	if best.is_empty():
-		# Safety net: never fall through the very bottom of the screen.
-		var scr := win.current_screen
-		var bottom := float(DisplayServer.screen_get_position(scr).y
-			+ DisplayServer.screen_get_size(scr).y)
-		if new_feet >= bottom:
-			best = { id = -1, y = bottom, x1 = 0.0, x2 = 0.0 }
+		# Safety net: never fall through the bottom of the usable screen
+		# area. This must match the real Dock-line platform's geometry
+		# exactly (same id -1, same y/x-range) — using the true physical
+		# screen bottom here instead used to place the pet below the
+		# taskbar, only for _current_platform() to find the real Dock entry
+		# next frame and snap it back up by the taskbar's height.
+		var usable := DisplayServer.screen_get_usable_rect(win.current_screen)
+		if new_feet >= float(usable.end.y):
+			best = { id = -1, y = float(usable.end.y),
+				x1 = float(usable.position.x), x2 = float(usable.end.x) }
 	if not best.is_empty():
 		pos_f.y = best.y - FOOT_Y
 		ground_id = best.id
@@ -952,8 +1015,14 @@ func _grounded_state() -> State:
 
 ## Sends the cat toward its house (from anywhere).
 func _head_home() -> void:
-	if state == State.HOME or state == State.ENTER_HOME or state == State.GO_HOME \
-			or state == State.EXIT_HOME:
+	if state == State.HOME or state == State.ENTER_HOME or state == State.EXIT_HOME:
+		return
+	if going_home:
+		# Already on the way — calling this again (H, or a second bridge
+		# enter_home) cancels the trip instead of no-op'ing.
+		going_home = false
+		if state == State.GO_HOME:
+			state = State.IDLE
 		return
 	if state == State.NAP:
 		_wake_up()
@@ -989,6 +1058,13 @@ func _go_home_tick(delta: float) -> void:
 	var p := _current_platform()
 	if p.is_empty():
 		_start_fall()  # going_home persists through the fall
+		return
+	if absf(dxd) < 10.0 and p.id != -1:
+		# Already lined up with the door on x, but not the Dock line itself
+		# (e.g. perched on the home ball's own crown, directly above the
+		# door but ~70px too high) — standing still would never converge on
+		# the y threshold. Step off and let gravity/flight find the door.
+		_start_fall()
 		return
 	pos_f.y = p.y - FOOT_Y
 	facing = 1 if dxd > 0.0 else -1
@@ -1181,7 +1257,7 @@ func _input(event: InputEvent) -> void:
 				if state != State.EAT:
 					state = State.DRAG
 			elif state == State.DRAG:
-				_start_fall()  # drop wherever it was released
+				_drop_release()  # settle right where it was released
 				if not drag_moved:
 					_boop()
 		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
@@ -1206,8 +1282,8 @@ func _toggle_play() -> void:
 		play_timer = PLAY_LENGTH
 		if state == State.NAP:
 			_wake_up()
-		if state == State.IDLE or state == State.WANDER:
-			state = State.PLAY
+		if state == State.IDLE or state == State.WANDER or state == State.GO_HOME:
+			state = State.PLAY  # also cancels an in-progress trip home
 		_spawn(&"notes", _above_head() + Vector2(0, 65))
 	elif state == State.PLAY:
 		state = State.IDLE
@@ -1216,7 +1292,7 @@ func _toggle_play() -> void:
 func _feed() -> void:
 	if state == State.EAT or state == State.FALL or state == State.DRAG \
 			or state == State.HOME or state == State.ENTER_HOME \
-			or state == State.EXIT_HOME:
+			or state == State.EXIT_HOME or state == State.HOP:
 		return
 	if state == State.NAP:
 		_wake_up()
