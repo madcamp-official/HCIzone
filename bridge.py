@@ -6,24 +6,23 @@ DeskSurfer 브리지 — 로봇(블루투스 시리얼) ↔ 버츄얼 펫(파일
 Godot 펫 앱을 이어준다. 둘은 서로를 직접 모르고, 오직 이 브리지를 통해서만
 하나의 존재처럼 이어진다.
 
-━━ 구현된 것 ━━
-  방향 A (로봇 → 펫)  [2단계]
-     로봇이 집에 도착하면 블루투스로 "ARRIVED"를 보낸다 → 그걸 받으면
-     펫의 command 파일에 "exit_home"을 써서 펫을 볼에서 꺼낸다.
+━━ 프로토콜 (firmware main_robot.ino 기준) ━━
+  · 로봇에 보내는 명령(단일 문자): F=주행 S=정지 H=귀가 G=재출발 ?=상태요청
+  · 로봇이 보내는 것(줄 단위, USB+BT 동시):
+      "ARRIVED"                       도착 순간 1회
+      "STATE=n dist=.. irL=.. irR=.." '?' 응답. n = 0..5 (아래 ROBOT_* 참고)
 
-  방향 B (펫 → 로봇)  [3단계]
-     펫이 볼에 들어가면 pet.gd 가 state 파일을 "home"으로 바꾼다 → 그 변화를
-     감지하면 로봇에 'F'(자유 주행)를 보내 책상 위를 돌아다니게 한다.
-
-  수동 트리거 (키보드)  [4단계]
-     'F'로 돌아다니는 로봇을 집으로 부르는 건 사람이 결정한다. 브리지 콘솔에서
-     키를 누르면 로봇에 단일 문자 명령을 보낸다:
-        h → H(귀가)   f → F(주행)   s → S(정지)   ? → 상태요청   q/Esc → 종료
-     (h 를 누르면 로봇이 비콘 유도로 귀가 → 도착 시 ARRIVED → 위 방향 A로
-      펫이 볼에서 나오며 한 바퀴가 완성된다.)
-
-━━ 다음 단계에서 추가할 것 ━━
-  · 5단계 안정화: 펫이 나올 때(state="virtual") 로봇에 'S'(정지) 자동 전송 등
+━━ 신뢰성 설계 (A-1 ~ A-4) ━━
+  A-1 도착 감지 이중화 : 단발 "ARRIVED"에만 의존하지 않고, 주기적으로 '?'를
+      보내 STATE=5(ARRIVED)를 폴링한다. 도착이면 exit_home 을 멱등하게 쓴다
+      (펫은 HOME 상태가 아니면 exit_home 을 무시하므로 반복 전송이 안전).
+      → "ARRIVED 한 줄 유실 시 펫이 볼에 영영 갇힘" 문제 해소.
+  A-2 로봇 상태 추적   : STATE 폴링으로 로봇 FSM을 알기에, 재연결 시 로봇이 이미
+      귀가(HOME)/도착(ARRIVED) 중이면 'F'를 보내지 않는다. → 진행 중 귀가를 깨지 않음.
+  A-3 연결 핸드셰이크   : 포트를 연 뒤 '?'를 보내 STATE= 응답이 오는 포트만 채택.
+      HC-06의 잘못된(수신) COM 오선택을 걸러낸다.
+  A-4 desync 방지 정지 : 펫이 볼에서 나올 때(state=virtual)와 브리지 종료 시
+      로봇에 'S'를 보내 무인 주행을 막는다.
 
 포트 번호가 매번 바뀌는 문제 → 하드코딩하지 않고 블루투스 시리얼 포트를
 자동 탐지한다(발신/Outgoing COM). 원하면 BRIDGE_PORT 환경변수로 강제 지정한다.
@@ -33,6 +32,7 @@ Godot 펫 앱을 이어준다. 둘은 서로를 직접 모르고, 오직 이 브
 """
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -51,8 +51,15 @@ except ImportError:
 # 로봇 펌웨어(main_robot.ino)의 Serial/HC-06 속도와 반드시 일치해야 한다.
 BAUD = 9600
 
-# state 파일을 얼마나 자주 확인할지(초). 파일 I/O라 너무 자주 읽지 않는다.
-STATE_POLL_SEC = 0.2
+# 로봇 FSM 상태값 (main_robot.ino enum State 와 1:1). '?' 응답의 STATE=n.
+ROBOT_IDLE, ROBOT_DRIVE, ROBOT_AVOID, ROBOT_CLIFF, ROBOT_HOME, ROBOT_ARRIVED = range(6)
+ROBOT_NAMES = {0: "IDLE", 1: "DRIVE", 2: "AVOID", 3: "CLIFF", 4: "HOME", 5: "ARRIVED"}
+
+PET_STATE_POLL_SEC = 0.2   # 펫의 state 파일을 읽는 주기
+ROBOT_POLL_SEC     = 1.0   # 로봇에 '?'를 보내 STATE를 확인하는 주기
+HANDSHAKE_SEC      = 2.0    # 연결 후 STATE 응답을 기다리는 시간
+
+STATE_RE = re.compile(r"STATE=(\d+)")
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +94,6 @@ def read_state(bridge_dir: Path):
     """펫이 쓴 state 파일을 읽는다. "virtual" 또는 "home".
 
     반환: 정리된 문자열, 파일 없으면 "", 읽기 실패(펫이 쓰는 중 등)면 None.
-    None이면 호출부는 이번 틱을 건너뛴다(잘못된 값으로 오동작하지 않도록).
     """
     path = bridge_dir / "state"
     try:
@@ -98,16 +104,17 @@ def read_state(bridge_dir: Path):
         return None
 
 
+def parse_robot_state(line: str):
+    """로봇이 보낸 줄에서 STATE=n 을 뽑는다. 없으면 None."""
+    m = STATE_RE.search(line)
+    return int(m.group(1)) if m else None
+
+
 # ---------------------------------------------------------------------------
-#  블루투스 시리얼 포트 자동 탐지
+#  블루투스 시리얼 포트 자동 탐지 + 핸드셰이크 (A-3)
 # ---------------------------------------------------------------------------
 def candidate_ports() -> list:
-    """열어볼 후보 COM 포트 목록. BRIDGE_PORT가 있으면 그것만 쓴다.
-
-    Windows에서 HC-06을 페어링하면 발신/수신 두 COM이 'Standard Serial over
-    Bluetooth link (COMx)' 같은 이름으로 잡힌다. 설명에 'bluetooth'가 들어간
-    포트를 후보로 모으고, main에서 실제로 열리는 것(=발신 COM)을 골라 쓴다.
-    """
+    """열어볼 후보 COM 포트 목록. BRIDGE_PORT가 있으면 그것만 쓴다."""
     forced = os.environ.get("BRIDGE_PORT", "").strip()
     if forced:
         return [forced]
@@ -119,49 +126,86 @@ def candidate_ports() -> list:
     return sorted(bt)
 
 
-def open_serial(port: str) -> serial.Serial:
-    ser = serial.Serial(port, BAUD, timeout=0.2)
-    time.sleep(0.3)          # HC-06 연결 직후 잠깐 안정화
-    ser.reset_input_buffer()
-    return ser
+def handshake(ser: serial.Serial, timeout: float = HANDSHAKE_SEC):
+    """'?'를 보내고 STATE=n 응답을 기다린다. 성공 시 로봇 상태(int), 실패 시 None.
+
+    이 응답이 오는 포트만 "진짜 로봇"으로 인정한다(HC-06 수신 COM 오선택 방지, A-3).
+    """
+    try:
+        ser.write(b"?")
+        ser.flush()
+    except Exception:
+        return None
+    deadline = time.monotonic() + timeout
+    buf = b""
+    while time.monotonic() < deadline:
+        try:
+            data = ser.read(64)
+        except Exception:
+            return None
+        if data:
+            buf += data
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                st = parse_robot_state(raw.decode("utf-8", "replace"))
+                if st is not None:
+                    return st
+    return None
 
 
 def connect():
-    """후보 포트를 하나씩 열어보고 처음 성공한 것을 돌려준다. 없으면 None."""
+    """후보 포트를 하나씩 열고 '?' 핸드셰이크가 통하는 것을 채택한다.
+
+    반환: (ser, robot_state) 성공, (None, None) 실패.
+    """
     ports = candidate_ports()
     if not ports:
         print("[대기] 블루투스 시리얼 포트를 못 찾음. "
               "(HC-06 페어링 확인 / BRIDGE_PORT 로 지정 가능)")
-        return None
+        return None, None
     for cand in ports:
         try:
-            ser = open_serial(cand)
-            print(f"[연결] {cand} @ {BAUD}bps")
-            return ser
+            ser = serial.Serial(cand, BAUD, timeout=0.2)
         except Exception as e:
             print(f"  {cand} 열기 실패: {e}")
-    return None
+            continue
+        time.sleep(0.3)             # HC-06 연결 직후 안정화
+        # 부팅 잡음만 비운다. 여기서 혹시 대기 중이던 ARRIVED를 지우더라도
+        # 이후 STATE 폴링(A-1)이 도착을 다시 잡아내므로 안전하다.
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+        st = handshake(ser)         # A-3: 응답 오는 포트만 인정
+        if st is not None:
+            print(f"[연결] {cand} @ {BAUD}bps (로봇 STATE={st} {ROBOT_NAMES.get(st, '?')})")
+            return ser, st
+        print(f"  {cand}: STATE 응답 없음(로봇 아님?) → 다음 후보")
+        try:
+            ser.close()
+        except Exception:
+            pass
+    return None, None
 
 
-def send_to_robot(ser: serial.Serial, ch: str, why: str = "") -> None:
+def send_to_robot(ser: serial.Serial, ch: str, why: str = "", quiet: bool = False) -> None:
     """로봇에 단일 문자 명령을 보낸다. F=주행 S=정지 H=귀가 G=재출발 ?=상태."""
     try:
         ser.write(ch.encode("ascii"))
         ser.flush()
-        note = f" ({why})" if why else ""
-        print(f"  [로봇 ←] '{ch}'{note}")
+        if not quiet:
+            note = f" ({why})" if why else ""
+            print(f"  [로봇 ←] '{ch}'{note}")
     except Exception as e:
-        print(f"  [로봇 ←] '{ch}' 전송 실패: {e}")
+        if not quiet:
+            print(f"  [로봇 ←] '{ch}' 전송 실패: {e}")
 
 
 # ---------------------------------------------------------------------------
 #  수동 트리거 (키보드)
 # ---------------------------------------------------------------------------
 def key_action(ch: str):
-    """키 한 글자 → (로봇에 보낼 명령 or None, 종료요청 bool).
-
-    순수 함수라 하드웨어 없이 단위 테스트할 수 있다.
-    """
+    """키 한 글자 → (로봇에 보낼 명령 or None, 종료요청 bool). 순수 함수."""
     low = ch.lower()
     if low == "h":
         return ("H", False)     # 귀가 (비콘 유도)
@@ -206,80 +250,116 @@ def poll_keyboard(ser: serial.Serial) -> bool:
 def main() -> None:
     bridge_dir = find_bridge_dir()
     print(f"[브리지] 우편함 = {bridge_dir}")
-    print("[브리지] 방향 A: 로봇 'ARRIVED' → 펫 exit_home")
-    print("[브리지] 방향 B: 펫 state=home → 로봇 'F'(주행)")
+    print("[브리지] 방향 A: 로봇 도착(ARRIVED/STATE=5) → 펫 exit_home  (폴링 이중화)")
+    print("[브리지] 방향 B: 펫 state=home → 로봇 'F' / state=virtual → 로봇 'S'")
     if HAVE_KB:
         print("[키] h=귀가  f=주행  s=정지  ?=상태  q/Esc=종료  "
               "(이 창에 포커스를 두고 눌러라)")
     else:
         print("[키] 이 OS에선 키보드 트리거 비활성 (Ctrl+C 로 종료)")
 
-    # 시작 시점의 state를 기준값으로 삼는다(시작만으로는 'F'를 쏘지 않음).
-    # 이후 virtual→home 으로 "바뀔 때"만 로봇을 깨운다.
+    # 시작 시점의 펫 state를 기준값으로 삼는다(시작만으로는 명령을 쏘지 않음).
     last_state = read_state(bridge_dir) or ""
 
     ser = None
+    robot_state = None            # 로봇 FSM (STATE 폴링으로 갱신). 미상이면 None
+    printed_state = None          # STATE 로그 스팸 억제용(변할 때만 출력)
     buf = b""
-    next_state_check = 0.0
+    next_pet_poll = 0.0
+    next_robot_poll = 0.0
 
-    while True:
-        # 포트가 없으면 연결(재연결)을 시도한다.
-        if ser is None:
-            ser = connect()
+    def trigger_exit_if_home():
+        """로봇이 도착했고 펫이 아직 볼 안이면 꺼낸다 (멱등, A-1)."""
+        if read_state(bridge_dir) == "home":
+            send_to_pet(bridge_dir, "exit_home")
+
+    try:
+        while True:
+            # 포트가 없으면 연결(재연결)을 시도한다.
             if ser is None:
-                time.sleep(3)  # 연결 대기 (이 구간의 종료는 Ctrl+C)
-                continue
-            buf = b""
-            # 연결 직후: 이미 펫이 볼 안(home)이면 로봇을 바로 주행시킨다.
-            cur = read_state(bridge_dir)
-            if cur is not None:
-                last_state = cur
-                if cur == "home":
-                    send_to_robot(ser, "F", "펫이 이미 집 안 → 로봇 주행")
+                ser, robot_state = connect()
+                if ser is None:
+                    time.sleep(3)   # 연결 대기 (이 구간의 종료는 Ctrl+C)
+                    continue
+                printed_state = robot_state
+                buf = b""
+                # A-2: 재연결 시점에 펫이 이미 볼 안(home)이고, 로봇이 귀가/도착
+                # 중이 아니라면(=아직 못 깨어난 상태) 주행을 시작시킨다.
+                cur = read_state(bridge_dir)
+                if cur is not None:
+                    last_state = cur
+                    if cur == "home" and robot_state not in (ROBOT_HOME, ROBOT_ARRIVED):
+                        send_to_robot(ser, "F", "재연결: 펫이 집 안 & 로봇 미귀가 → 주행")
 
-        # --- 방향 A: 로봇이 보낸 줄을 읽는다 ---
-        try:
-            data = ser.read(256)
-        except Exception as e:
-            print(f"[끊김] 시리얼 오류: {e}. 재연결 시도...")
+            # --- 로봇이 보낸 줄 읽기 ---
+            try:
+                data = ser.read(256)
+            except Exception as e:
+                print(f"[끊김] 시리얼 오류: {e}. 재연결 시도...")
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                ser = None
+                time.sleep(1)
+                continue
+
+            if data:
+                buf += data
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    text = raw.decode("utf-8", "replace").strip()
+                    if not text:
+                        continue
+                    st = parse_robot_state(text)
+                    if st is not None:
+                        # STATE 응답: 상태가 바뀔 때만 출력(1초 폴링 스팸 억제).
+                        robot_state = st
+                        if st != printed_state:
+                            print(f"[로봇 STATE] {ROBOT_NAMES.get(st, st)}")
+                            printed_state = st
+                    else:
+                        print(f"[로봇 →] {text}")
+                    # A-1: 도착 감지 — 단발 ARRIVED 든 STATE=5 든 모두 반응(멱등).
+                    if "ARRIVED" in text.upper() or st == ROBOT_ARRIVED:
+                        trigger_exit_if_home()
+
+            now = time.monotonic()
+
+            # A-1: 주기적으로 '?'를 보내 STATE를 폴링(조용히). 응답은 위 읽기 루프에서 처리.
+            if now >= next_robot_poll:
+                next_robot_poll = now + ROBOT_POLL_SEC
+                send_to_robot(ser, "?", quiet=True)
+
+            # --- 방향 B: 펫 state 파일 변화 감지 ---
+            if now >= next_pet_poll:
+                next_pet_poll = now + PET_STATE_POLL_SEC
+                cur = read_state(bridge_dir)
+                if cur is not None and cur != last_state:
+                    print(f"[펫 state] {last_state or '(없음)'} → {cur}")
+                    if cur == "home":
+                        # 펫이 볼에 들어감 = 로봇 차례 → 주행(도착·귀가 중이어도
+                        # 이건 새로운 의도이므로 F 전송).
+                        send_to_robot(ser, "F", "펫이 집에 들어감 → 로봇 자유 주행")
+                    elif cur == "virtual":
+                        # A-4: 펫이 볼에서 나옴 = 로봇은 쉴 차례 → 정지.
+                        send_to_robot(ser, "S", "펫이 볼에서 나옴 → 로봇 정지")
+                    last_state = cur
+
+            # --- 수동 트리거: 키보드 ---
+            if poll_keyboard(ser):
+                print("[종료] 키 입력으로 브리지 정지")
+                break
+
+            time.sleep(0.01)
+    finally:
+        # A-4: 어떤 경로로 종료하든(q/Esc/Ctrl+C) 로봇을 세우고 나간다.
+        if ser is not None:
+            send_to_robot(ser, "S", "브리지 종료 → 로봇 정지")
             try:
                 ser.close()
             except Exception:
                 pass
-            ser = None
-            time.sleep(1)
-            continue
-
-        if data:
-            buf += data
-            while b"\n" in buf:
-                raw, buf = buf.split(b"\n", 1)
-                text = raw.decode("utf-8", "replace").strip()
-                if not text:
-                    continue
-                print(f"[로봇 →] {text}")
-                # 로봇은 도착 순간 딱 한 번 "ARRIVED"를 보낸다(main_robot.ino).
-                if "ARRIVED" in text.upper():
-                    send_to_pet(bridge_dir, "exit_home")
-
-        # --- 방향 B: state 파일이 "home"으로 바뀌면 로봇을 주행시킨다 ---
-        now = time.monotonic()
-        if now >= next_state_check:
-            next_state_check = now + STATE_POLL_SEC
-            cur = read_state(bridge_dir)
-            if cur is not None and cur != last_state:
-                print(f"[state] {last_state or '(없음)'} → {cur}")
-                if cur == "home":
-                    send_to_robot(ser, "F", "펫이 집에 들어감 → 로봇 자유 주행")
-                # (5단계) elif cur == "virtual": send_to_robot(ser, "S", ...)
-                last_state = cur
-
-        # --- 수동 트리거: 키보드 (h→H 로 로봇을 집으로 부른다) ---
-        if poll_keyboard(ser):
-            print("[종료] 키 입력으로 브리지 정지")
-            break
-
-        time.sleep(0.01)
 
 
 if __name__ == "__main__":
