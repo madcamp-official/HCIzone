@@ -150,9 +150,8 @@ lives at the repo root. Working branch: **`dev`**.
   `pet.gd`, plus the ball-shadow row nudge in `home.gd` and the new
   `sprites/items.png`) are committed and pushed to `dev` on top of `e748721`.
   Nothing is left uncommitted.
-- **`fix/virtual_bot_minor_error_fixing` is merged into `dev`.** It brings a
-  teammate's `desk_pet_robot/desk_pet_robot.ino` (Arduino firmware skeleton)
-  plus pet.gd fixes: a dropped parrot now settles where it was released
+- **`fix/virtual_bot_minor_error_fixing` is merged into `dev`.** It brought
+  pet.gd fixes: a dropped parrot now settles where it was released
   (`_drop_release`, `DROP_SNAP_UP`) instead of flying off to a random perch;
   `_fly_step` retargets a moving app window mid-flight; the fall safety net
   uses the usable rect so it can't land under the Dock; `_rebuild_platforms()`
@@ -163,6 +162,17 @@ lives at the repo root. Working branch: **`dev`**.
   the all-passthrough polygon instead of swallowing every click.
   Only conflict was `_ready()` — `_load_snack()` vs the moved
   `_begin_flight()`; both were kept.
+- **`feature/arduino_code` is merged into `dev`** (fast-forward). The robot
+  firmware now lives under `firmware/`: `main_robot/main_robot.ino` is the
+  real robot (non-blocking millis() state machine: IDLE→DRIVE→AVOID/CLIFF→
+  HOME→ARRIVED, HC-06 Bluetooth `F/S/H/G/?` commands, HC-SR04 obstacle
+  avoidance, KY-032 cliff guard checked every loop, dual KY-022 IR-beacon
+  homing), `tests/01..08` are per-sensor bring-up sketches, and
+  `firmware/00_통합_핀맵.md` is the pin map. `bridge.py` at the repo root is
+  the host-side bridge. The earlier `desk_pet_robot/desk_pet_robot.ino`
+  skeleton was removed in favor of `main_robot`. A stray committed
+  `__pycache__/*.pyc` was untracked and `__pycache__/` + `*.pyc` added to
+  `.gitignore`.
 
 ## What's implemented
 
