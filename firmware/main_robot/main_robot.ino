@@ -66,7 +66,7 @@ const uint16_t BACKUP_MS = 350;    // 후진 시간
 const uint16_t TURN_MS   = 400;    // 회전 시간
 
 // 초음파
-const uint16_t OBSTACLE_CM     = 15;    // 이 거리 이하면 장애물로 판단
+const uint16_t OBSTACLE_CM     = 5;    // 이 거리 이하면 장애물로 판단
 const uint16_t ULTRA_PERIOD_MS = 60;    // 초음파 측정 주기
 const uint32_t ECHO_TIMEOUT_US = 8000;  // ~1.3m. pulseIn 블로킹 상한을 짧게.
 
@@ -94,7 +94,7 @@ const uint16_t HOME_RELOCATE_MS = 400; // 한 바퀴 훑어도 못 찾으면 전
 SoftwareSerial bt(PIN_BT_RX, PIN_BT_TX);
 
 enum State { ST_IDLE, ST_DRIVE, ST_AVOID, ST_CLIFF, ST_HOME, ST_ARRIVED };
-State state = ST_IDLE;
+State state = ST_IDLE;.
 State resumeState = ST_DRIVE;   // AVOID/CLIFF 종료 후 복귀할 상태
 
 // 회피/낭떠러지 시퀀스 진행용
