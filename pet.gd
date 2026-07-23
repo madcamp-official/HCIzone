@@ -201,6 +201,12 @@ var eat_gold := false
 # as …-home.png) PET_SNAP_AT seconds after launch (default ~2 s).
 @onready var _snap_path := OS.get_environment("PET_SNAP")
 @onready var _snap_at := maxf(OS.get_environment("PET_SNAP_AT").to_float(), 0.5)
+# PET_NO_AUTOHOME=1 disables the pet's autonomous "go home every few minutes"
+# trip. Handy when testing the robot bridge: the pet then only heads home on an
+# explicit H key, a Pokéball click, or a bridge command (enter_home) — it won't
+# wander into the ball on its own and spuriously drive the robot. Every other
+# path to home stays live; only the self-triggered trip is gated.
+@onready var _auto_home := OS.get_environment("PET_NO_AUTOHOME") == ""
 
 
 func _ready() -> void:
@@ -819,8 +825,8 @@ func _process(delta: float) -> void:
 				pass  # bounding off to another ledge
 			elif randf() < delta * 0.12:
 				_start_wander()
-			elif randf() < delta * 0.006:
-				_head_home()  # every few minutes it goes home on its own
+			elif _auto_home and randf() < delta * 0.006:
+				_head_home()  # every few minutes it goes home on its own (PET_NO_AUTOHOME=1 disables)
 			elif hunger > HUNGRY_AFTER and randf() < delta * 0.35:
 				# Lowered toward the head so the mark reads as coming off the pet.
 				_spawn(&"hungry", _above_head() + Vector2(0, 95))

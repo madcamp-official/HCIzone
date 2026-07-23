@@ -33,6 +33,18 @@ Godot 펫 앱을 이어준다. 둘은 서로를 직접 모르고, 오직 이 브
   A-5 귀가 명령 보정   : state=recall 인데 로봇이 아직 HOME/ARRIVED 가 아니면
       폴링마다 'H'를 조용히 재전송한다. → 'H' 한 번 유실돼도 결국 도킹한다.
 
+━━ 수동 비콘 우회 (B-1) ━━
+  비콘 IR 도킹이 아직 불안정해 ARRIVED가 안 올 때, 이 콘솔에서 직접 s/f를 눌러
+  도착 신호 없이도 펫의 등장/귀가를 수동으로 맞출 수 있다.
+    s → 로봇 정지 + 펫이 아직 볼 안(home/recall)이면 꺼낸다(exit_home).
+        trigger_exit_if_home()을 A-1과 그대로 공유하므로 판정 기준이 어긋나지 않는다.
+    f → 로봇 주행 + 펫을 집으로 보낸다(enter_home). 펫이 이미 집 안이거나
+        입장/퇴장 애니메이션 중이면 pet.gd가 알아서 무시하므로 중복 호출이 안전하다.
+  비콘이 정상 동작해도 이 경로는 그대로 병행 가능하다 — A-1(ARRIVED/STATE=5)과
+  이 수동 경로 둘 다 같은 trigger_exit_if_home()을 호출하는 멱등 동작이라 서로
+  간섭하지 않는다. h(귀가/비콘 유도)는 대상이 아니다 — 실제 도킹 판정은 여전히
+  로봇의 ARRIVED/STATE=5에만 맡긴다.
+
 포트 번호가 매번 바뀌는 문제 → 하드코딩하지 않고 블루투스 시리얼 포트를
 자동 탐지한다(발신/Outgoing COM). 원하면 BRIDGE_PORT 환경변수로 강제 지정한다.
 
@@ -210,6 +222,20 @@ def send_to_robot(ser: serial.Serial, ch: str, why: str = "", quiet: bool = Fals
             print(f"  [로봇 ←] '{ch}' 전송 실패: {e}")
 
 
+def trigger_exit_if_home(bridge_dir: Path) -> None:
+    """로봇이 도착했고 펫이 아직 볼 안이면 꺼낸다 (멱등, A-1 / B-1 공용).
+
+    볼 안 상태는 "home"(로봇 자유 주행)과 "recall"(소환해 도킹 대기) 둘 다다.
+    소환 중(recall)일 때도 반드시 꺼내야 왕복이 닫힌다 — 여길 "home"으로만
+    좁히면 소환 후 도착해도 펫이 볼에 영영 갇힌다.
+
+    메인 루프의 ARRIVED/STATE=5 감지(A-1)와 수동 s 키(B-1) 양쪽에서 공유해서
+    호출한다 — 판정 기준이 하나로 고정되므로 두 경로가 서로 어긋날 수 없다.
+    """
+    if read_state(bridge_dir) in ("home", "recall"):
+        send_to_pet(bridge_dir, "exit_home")
+
+
 # ---------------------------------------------------------------------------
 #  수동 트리거 (키보드)
 # ---------------------------------------------------------------------------
@@ -229,10 +255,14 @@ def key_action(ch: str):
     return (None, False)
 
 
-def poll_keyboard(ser: serial.Serial) -> bool:
+def poll_keyboard(ser: serial.Serial, bridge_dir: Path) -> bool:
     """콘솔 키 입력을 논블로킹으로 처리한다. 종료 요청 시 True.
 
     이 콘솔 창에 포커스가 있을 때만 키가 잡힌다(수동 트리거의 특성).
+
+    B-1: 수동 s/f는 로봇 명령과 별개로 펫 쪽에도 직접 반영된다 — 비콘 도킹이
+    안 되는 동안, ARRIVED 없이도 s로 즉시 펫을 꺼내고 f로 다시 집으로 보낼 수
+    있는 수동 우회로다. h/?/q는 로봇 전용이라 펫 쪽에 아무 영향이 없다.
     """
     if not HAVE_KB:
         return False
@@ -248,6 +278,12 @@ def poll_keyboard(ser: serial.Serial) -> bool:
             reasons = {"H": "수동: 귀가", "F": "수동: 주행",
                        "S": "수동: 정지", "?": "수동: 상태 요청"}
             send_to_robot(ser, cmd, reasons.get(cmd, "수동"))
+            if cmd == "S":
+                # B-1: 비콘 우회 — 정지를 "도착"으로 간주하고 펫이 볼 안이면 꺼낸다.
+                trigger_exit_if_home(bridge_dir)
+            elif cmd == "F":
+                # B-1: 비콘 우회 — 주행 재개는 펫을 집으로 보낸다(이미 집이면 무해).
+                send_to_pet(bridge_dir, "enter_home")
         if want_quit:
             quit_requested = True
     return quit_requested
@@ -261,9 +297,10 @@ def main() -> None:
     print(f"[브리지] 우편함 = {bridge_dir}")
     print("[브리지] 방향 A: 로봇 도착(ARRIVED/STATE=5) → 펫 exit_home  (폴링 이중화)")
     print("[브리지] 방향 B: 펫 home→'F' / recall→'H'(도킹) / virtual→'S'")
+    print("[브리지] B-1(수동 비콘 우회): s=정지+펫 꺼내기 / f=주행+펫 집으로")
     if HAVE_KB:
-        print("[키] h=귀가  f=주행  s=정지  ?=상태  q/Esc=종료  "
-              "(이 창에 포커스를 두고 눌러라)")
+        print("[키] h=귀가(비콘 유도)  f=주행(+펫 집으로)  s=정지(+펫 꺼내기)  "
+              "?=상태  q/Esc=종료  (이 창에 포커스를 두고 눌러라)")
     else:
         print("[키] 이 OS에선 키보드 트리거 비활성 (Ctrl+C 로 종료)")
 
@@ -276,16 +313,6 @@ def main() -> None:
     buf = b""
     next_pet_poll = 0.0
     next_robot_poll = 0.0
-
-    def trigger_exit_if_home():
-        """로봇이 도착했고 펫이 아직 볼 안이면 꺼낸다 (멱등, A-1).
-
-        볼 안 상태는 "home"(로봇 자유 주행)과 "recall"(소환해 도킹 대기) 둘 다다.
-        소환 중(recall)일 때도 반드시 꺼내야 왕복이 닫힌다 — 여길 "home"으로만
-        좁히면 소환 후 도착해도 펫이 볼에 영영 갇힌다.
-        """
-        if read_state(bridge_dir) in ("home", "recall"):
-            send_to_pet(bridge_dir, "exit_home")
 
     try:
         while True:
@@ -338,7 +365,7 @@ def main() -> None:
                         print(f"[로봇 →] {text}")
                     # A-1: 도착 감지 — 단발 ARRIVED 든 STATE=5 든 모두 반응(멱등).
                     if "ARRIVED" in text.upper() or st == ROBOT_ARRIVED:
-                        trigger_exit_if_home()
+                        trigger_exit_if_home(bridge_dir)
 
             now = time.monotonic()
 
@@ -374,7 +401,7 @@ def main() -> None:
                     last_state = cur
 
             # --- 수동 트리거: 키보드 ---
-            if poll_keyboard(ser):
+            if poll_keyboard(ser, bridge_dir):
                 print("[종료] 키 입력으로 브리지 정지")
                 break
 
